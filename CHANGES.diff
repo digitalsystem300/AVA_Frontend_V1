@@ -1,0 +1,169 @@
+--- original/index.html	2026-11-23 17:10:34.433971438 +0530
++++ index.html	2026-11-23 17:11:24.422620403 +0530
+@@ -7,7 +7,7 @@
+ <title>AI Virtual Assistant</title>
+ <link rel="manifest" href="./manifest.json">
+ <link rel="icon" href="./favicon.ico">
+-<script>window.JARVIS_CONFIG={infoApi:"",voiceWs:""}; /* infoApi: your deployed /api/info URL (news+search). voiceWs: optional ws(s) URL that sends card events. */</script>
++<script src="./ava-config.js"></script>
+ <style>
+ :root{--cyan:#00eaff;--blue:#008cff;--deep:#020817}
+ *{margin:0;padding:0;box-sizing:border-box}
+@@ -258,33 +258,15 @@
+ import * as THREE from "three";
+ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+ import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
++import { createAvaClient } from "./ava-client.js";
+ 
+ /* ===== ai ===== */
+-// Backend contract copied from the existing index.html — unchanged:
+-// POST { message, messages, character, language } -> { success, reply }
+-const API_URL = "https://aryan-ai-backend-v2.vercel.app/api/chat";
+-const MAX_HISTORY = 20;
+-let conversation = []; // in memory only; never persisted
+-
++// Chat goes through AVA Backend V1 (Gemini Live over WebSocket). Transport: ./ava-client.js, backend URL: ./ava-config.js.
++// askAI keeps its original contract: user text in, reply text out (the server keeps the conversation context).
+ export async function askAI(message) {
+-  const ctrl = new AbortController();
+-  const timer = setTimeout(() => ctrl.abort(), 30000);
+-  try {
+-    const res = await fetch(API_URL, {
+-      method: "POST",
+-      headers: { "Content-Type": "application/json" },
+-      body: JSON.stringify({ message, messages: conversation, character: "assistant", language: "hinglish" }),
+-      signal: ctrl.signal
+-    });
+-    if (!res.ok) throw new Error("API error " + res.status);
+-    const data = await res.json();
+-    if (!data || !data.success || typeof data.reply !== "string" || !data.reply.trim()) throw new Error("Invalid AI response");
+-    conversation.push({ role: "user", content: message }, { role: "assistant", content: data.reply });
+-    conversation = conversation.slice(-MAX_HISTORY);
+-    return data.reply;
+-  } finally {
+-    clearTimeout(timer);
+-  }
++  const reply = await ava.ask(message);
++  if (typeof reply !== "string" || !reply.trim()) throw new Error("Invalid AI response");
++  return reply;
+ }
+ 
+ /* ===== avatar ===== */
+@@ -726,7 +708,7 @@
+ function setState(s) { if (animator) animator.state = s; }
+ 
+ // ===== Holographic information cards =====
+-const CFG = window.JARVIS_CONFIG || {};
++const CFG = window.AVA_CONFIG || {};
+ const TITLES = { weather: "WEATHER", news: "NEWS", currency: "CURRENCY", clock: "TIME", search: "SEARCH RESULTS" };
+ 
+ // <intent>
+@@ -781,10 +763,19 @@
+   if (!j.results || !j.results[0]) throw new Error("Could not find a place called \u201c" + name + "\u201d.");
+   return j.results[0];
+ }
+-const viaBackend = (type, q) => {
+-  if (!CFG.infoApi) throw new Error("News/search service is not configured yet (set JARVIS_CONFIG.infoApi).");
+-  return getJSON(CFG.infoApi + "?type=" + type + "&q=" + encodeURIComponent(q || ""));
++// AVA Backend V1 tool results -> the field names the card renderers below expect. REST responses and card.open
++// content share one shape. Fields the backend does not send stay empty and render as "Data unavailable".
++const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return ""; } };
++const head = (x) => String(x == null ? "" : x).split(",")[0].trim();
++const fromAva = {
++  weather: (c) => ({ location: head(c.location), temperature: c.temperature_c, condition: c.condition || wmo(c.weather_code)[0], icon: wmo(c.weather_code)[1], humidity: c.humidity_percent, windSpeed: c.wind_speed_kmh,
++    rainProbability: c.rain_probability_percent, sunrise: c.sunrise, sunset: c.sunset, updated: c.observed_at }),
++  currency: (c) => ({ amount: c.original_amount, from: c.source_currency, to: c.target_currency, result: c.converted_amount, rate: c.exchange_rate, date: c.rate_date }),
++  clock: (c) => ({ city: head(c.location), timezone: c.timezone }),
++  news: (c) => ({ items: (c.articles || []).map((a) => ({ title: a.headline, summary: a.description, source: a.source, publishedAt: a.published_at, url: a.url })) }),
++  search: (c) => ({ items: (c.results || []).map((r) => ({ title: r.title, url: r.url, description: r.snippet, host: hostOf(r.url) })) })
+ };
++const AVA_CARD_TYPE = { weather: "weather", currency: "currency", time: "clock", news: "news", search: "search" }; // backend card_type -> card type here
+ const loaders = {
+   async weather({ location }) {
+     const g = await geocode(location);
+@@ -805,8 +796,8 @@
+     if (!g.timezone) throw new Error("No time zone data for " + g.name + ".");
+     return { city: g.name, timezone: g.timezone };
+   },
+-  news: ({ query }) => viaBackend("news", query),
+-  search: ({ query }) => viaBackend("search", query)
++  news: async ({ query }) => fromAva.news(await ava.news(query || CFG.defaultNewsQuery || "latest news")),
++  search: async ({ query }) => fromAva.search(await ava.search(query))
+ };
+ const dash = '<i class="na">Data unavailable</i>';
+ const render = {
+@@ -838,7 +829,7 @@
+ };
+ 
+ function createCards(onLayout) {
+-  let root, card, tabEl, content, sndBtn, ro, cur = null, token = 0, tick = 0, closeT = 0, lastKey = "", wsStop = null;
++  let root, card, tabEl, content, sndBtn, ro, cur = null, token = 0, tick = 0, closeT = 0, lastKey = "";
+   const inflight = new Map(), fmts = new Map();
+ 
+   // --- synthesized sound effects (Web Audio): fade in/out, no overlap, no rapid repeats, only after a user gesture ---
+@@ -955,27 +946,27 @@
+     try { return SAY[it.type](await request(it.type, it.args)); }
+     catch (e) { return "Maaf kijiye, ye jaankari abhi nahi mil paayi. Card par retry ka option hai."; }
+   }
+-  function connect(url) {
+-    let ws, tries = 0, stop = false;
+-    const open = () => {
+-      if (stop) return; ws = new WebSocket(url);
+-      ws.onopen = () => { tries = 0; };
+-      ws.onmessage = (e) => { if (typeof e.data !== "string") return; try { handleEvent(JSON.parse(e.data)); } catch (err) {} };  // binary audio frames are ignored
+-      ws.onclose = () => { if (!stop) setTimeout(open, Math.min(1000 * Math.pow(2, tries++), 15000)); };
+-      ws.onerror = () => { try { ws.close(); } catch (err) {} };
+-    };
+-    open(); wsStop = () => { stop = true; try { ws.close(); } catch (err) {} };
+-  }
+   function destroy() {
+-    clearInterval(tick); clearTimeout(closeT); if (wsStop) wsStop(); if (ro) ro.disconnect();
++    clearInterval(tick); clearTimeout(closeT); if (ro) ro.disconnect();
+     window.removeEventListener("resize", layout); sfx.destroy(); if (root) root.remove(); root = null;
+   }
+-  return { unlock: sfx.unlock, request, handleEvent, tryHandle, close, connect, destroy };
++  return { unlock: sfx.unlock, request, handleEvent, tryHandle, close, destroy };
+ }
+ const cards = createCards((rs) => { if (stage) { stage.reserve = rs; stage.resize(true); } });
+ window.JarvisCards = cards;
+ document.addEventListener("pointerdown", () => cards.unlock(), { once: true });
+ 
++// ===== AVA Backend V1 connection =====
++// Backend card events -> the existing card system. card.request carries no data (card.open follows with the data), and
++// the "custom" text card from open_card has no renderer in this UI, so both are ignored.
++function onAvaEvent(m) {
++  if (m.type === "card.open" && m.card) {
++    const t = AVA_CARD_TYPE[m.card.card_type];
++    if (t && m.card.content) cards.handleEvent({ type: "card.open", card: t, data: fromAva[t](m.card.content) });
++  } else if (m.type === "card.close") cards.handleEvent({ type: "card.close" });
++}
++const ava = createAvaClient({ config: window.AVA_CONFIG, onEvent: onAvaEvent, onNotice: (msg) => toast(msg, 6000) });
++
+ async function init() {
+   hud.set(4);
+   showGate("Tap to start");
+@@ -1020,7 +1011,7 @@
+   }
+   if (failure) { toast(failure.message, 12000); hud.fail(failure.message); }
+   else hud.success();
+-  if (CFG.voiceWs) cards.connect(CFG.voiceWs);
++  ava.health().then((h) => console.info("AVA backend health:", h.ok ? "ok (" + h.ms + " ms)" : "unreachable - " + h.error)); // also wakes a sleeping Render instance
+ }
+ 
+ let dbgTimer = 0;
+@@ -1080,13 +1071,13 @@
+     showGate(denied ? "Microphone blocked — allow it in browser settings, then tap" : "Microphone not available on this browser");
+     return;
+   }
+-  gate.hidden = true; setState("listening"); voice.start();
++  gate.hidden = true; setState("listening"); voice.start(); ava.warmUp();
+ });
+ 
+ function cleanup() {
+   cancelAnimationFrame(raf); raf = 0;
+   if (voice) voice.stopAll();
+-  cards.destroy();
++  cards.destroy(); ava.close();
+   if (animator) animator.dispose();
+   if (stage) { disposeAvatar(stage, vrm); stage.dispose(); }
+   clearInterval(dbgTimer);
