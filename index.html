@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#020817">
+<title>AI Virtual Assistant</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./favicon.ico">
+<script src="./ava-config.js"></script>
+<style>
+:root{--cyan:#00eaff;--blue:#008cff;--deep:#020817}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;height:100dvh;overflow:hidden;overscroll-behavior:none;touch-action:manipulation;background:var(--deep);font-family:system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
+#background{position:fixed;inset:0;z-index:0;background:linear-gradient(rgba(0,5,20,.15),rgba(0,5,20,.35)),url("./assets/background/command-center.jpg") center/cover no-repeat}
+#overlay{position:fixed;inset:0;z-index:4;pointer-events:none;background:radial-gradient(ellipse at center,transparent 30%,rgba(0,5,20,.45) 100%)}
+#floor{position:fixed;left:-25%;right:-25%;bottom:0;height:34%;z-index:1;pointer-events:none;
+ background:repeating-linear-gradient(90deg,rgba(0,234,255,.18) 0 1px,transparent 1px 64px),repeating-linear-gradient(0deg,rgba(0,234,255,.14) 0 1px,transparent 1px 48px);
+ transform:perspective(500px) rotateX(62deg);transform-origin:bottom;
+ -webkit-mask-image:linear-gradient(to top,#000,transparent);mask-image:linear-gradient(to top,#000,transparent);animation:floor 8s linear infinite}
+@keyframes floor{to{background-position:0 48px,64px 0}}
+.panel{position:fixed;z-index:2;pointer-events:none;border:1px solid rgba(0,234,255,.35);border-radius:6px;
+ background:linear-gradient(135deg,rgba(0,140,255,.12),rgba(0,234,255,.04));box-shadow:0 0 24px rgba(0,180,255,.18) inset;animation:float 7s ease-in-out infinite alternate}
+.p1{width:min(22vw,220px);height:min(14vw,140px);left:4%;top:14%}
+.p2{width:min(18vw,180px);height:min(24vw,240px);right:4%;top:20%;animation-delay:1.5s}
+.p3{width:min(16vw,160px);height:min(10vw,100px);left:8%;top:52%;animation-delay:3s}
+@keyframes float{to{transform:translateY(-14px);opacity:.6}}
+@media(max-width:700px){.panel{opacity:.35}.p3{display:none}}
+@media(orientation:portrait){.p1{left:3%;top:5%;width:26vw;height:16vw}.p2{right:3%;top:8%;width:20vw;height:28vw}#background{background-position:50% 40%}}
+.light{position:fixed;width:280px;height:280px;border-radius:50%;filter:blur(90px);pointer-events:none;z-index:2;opacity:.35;animation:lm 6s ease-in-out infinite alternate}
+.light1{background:var(--blue);left:-120px;top:25%}
+.light2{background:var(--cyan);right:-120px;top:45%;animation-delay:2s}
+@keyframes lm{from{transform:scale(.8);opacity:.2}to{transform:scale(1.2);opacity:.5}}
+#avatarContainer{position:fixed;top:0;left:0;right:0;height:100vh;height:100dvh;z-index:5;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+#avatarContainer canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#voiceGlow{position:fixed;width:300px;height:200px;left:50%;bottom:-120px;transform:translateX(-50%);background:var(--cyan);filter:blur(90px);opacity:0;transition:opacity .4s;z-index:3;pointer-events:none}
+body.speaking #voiceGlow{opacity:.55}
+#gate{position:fixed;inset:0;z-index:20;border:0;background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:14px;padding-bottom:calc(8vh + env(safe-area-inset-bottom,0px));color:#bfefff;font-size:15px;text-shadow:0 0 8px #000;cursor:pointer}
+#gate i{width:64px;height:64px;border-radius:50%;border:2px solid var(--cyan);box-shadow:0 0 30px var(--cyan);animation:pulse 1.8s ease-in-out infinite}
+#gate[hidden]{display:none}
+@keyframes pulse{50%{transform:scale(1.18);opacity:.55}}
+#toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:30;max-width:90vw;padding:10px 16px;border-radius:10px;
+ background:rgba(2,8,23,.85);border:1px solid rgba(0,234,255,.4);color:#d8f6ff;font-size:14px;text-align:center;opacity:0;pointer-events:none;transition:opacity .3s}
+#toast.show{opacity:1}
+@media(prefers-reduced-motion:reduce){#floor,.panel,.light,#gate i{animation:none}}
+
+/* ===== HUD loading screen ===== */
+:root{--safe-top:env(safe-area-inset-top,0px);--safe-right:env(safe-area-inset-right,0px);--safe-bottom:env(safe-area-inset-bottom,0px);--safe-left:env(safe-area-inset-left,0px)}
+#hud{--hc:#19d8ff;--st:#35ff6a;
+ --pt:max(16px,var(--safe-top));--pr:max(16px,var(--safe-right));--pb:max(16px,var(--safe-bottom));--pl:max(16px,var(--safe-left));
+ --avail:calc(100vh - var(--pt) - var(--pb));--reserve:250px;--core-max:380px;
+ position:fixed;inset:0;z-index:100;width:100%;min-height:100vh;min-height:100dvh;box-sizing:border-box;
+ padding:var(--pt) var(--pr) var(--pb) var(--pl);display:flex;flex-direction:column;overflow:hidden;
+ color:#e8f8ff;font-family:"Orbitron","Rajdhani","Eurostile","Segoe UI",system-ui,sans-serif;
+ background:radial-gradient(ellipse at 50% 38%,#06306a 0%,#020b22 52%,#01040e 100%);opacity:1;transition:opacity .8s ease}
+@supports (height:100dvh){#hud{--avail:calc(100dvh - var(--pt) - var(--pb))}}
+#hud *,#hud *::before,#hud *::after{box-sizing:border-box}
+#hud.out{opacity:0;visibility:hidden;pointer-events:none;transition:opacity .8s ease,visibility 0s .8s}
+#hud.err{--st:#ff4d5e}
+#hud::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:min(24vw,140px);transform:translateX(-50%);background:linear-gradient(90deg,transparent,rgba(25,216,255,.16),transparent);filter:blur(6px);pointer-events:none}
+.hud-grid{position:absolute;left:-30%;right:-30%;bottom:0;height:30%;pointer-events:none;background:repeating-linear-gradient(90deg,rgba(25,216,255,.2) 0 1px,transparent 1px 56px),repeating-linear-gradient(0deg,rgba(25,216,255,.14) 0 1px,transparent 1px 44px);transform:perspective(420px) rotateX(64deg);transform-origin:bottom;-webkit-mask-image:linear-gradient(to top,#000,transparent);mask-image:linear-gradient(to top,#000,transparent)}
+/* corner brackets sit just outside the safe content box (decorative only) */
+.hud-br{position:absolute;width:clamp(48px,18vw,92px);height:clamp(48px,18vw,92px);border:2px solid var(--hc);box-shadow:0 0 12px var(--hc);pointer-events:none;opacity:.8}
+.hud-br.tl{top:calc(var(--pt) - 8px);left:calc(var(--pl) - 8px);border-right:0;border-bottom:0;border-top-left-radius:20px}
+.hud-br.tr{top:calc(var(--pt) - 8px);right:calc(var(--pr) - 8px);border-left:0;border-bottom:0;border-top-right-radius:20px}
+.hud-br.bl{bottom:calc(var(--pb) - 8px);left:calc(var(--pl) - 8px);border-right:0;border-top:0;border-bottom-left-radius:20px}
+.hud-br.brr{bottom:calc(var(--pb) - 8px);right:calc(var(--pr) - 8px);border-left:0;border-top:0;border-bottom-right-radius:20px}
+.hud-side{position:absolute;top:50%;width:clamp(110px,11vw,210px);display:none;flex-direction:column;gap:14px;transform:translateY(-50%);pointer-events:none}
+.hud-side.l{left:max(3vw,calc(var(--pl) + 16px))}
+.hud-side.r{right:max(3vw,calc(var(--pr) + 16px));align-items:flex-end}
+.hud-side b{display:block;height:6px;width:100%;background:linear-gradient(90deg,var(--hc),transparent);transform-origin:left;opacity:.75;animation:meter 3.2s ease-in-out infinite alternate}
+.hud-side.r b{background:linear-gradient(270deg,var(--hc),transparent);transform-origin:right}
+.hud-side b:nth-child(2){width:70%;animation-delay:-.6s}.hud-side b:nth-child(3){width:90%;animation-delay:-1.1s}.hud-side b:nth-child(4){width:55%;animation-delay:-1.7s}.hud-side b:nth-child(5){width:80%;animation-delay:-2.2s}.hud-side b:nth-child(6){width:65%;animation-delay:-2.8s}
+@keyframes meter{from{transform:scaleX(.3)}to{transform:scaleX(1)}}
+.hud-top,.hud-main{position:relative;z-index:1}
+.hud-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex:none;padding:clamp(8px,2vw,18px)}
+.hud-chip{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--hc);border-radius:10px;background:rgba(0,40,90,.5);box-shadow:0 0 12px rgba(25,216,255,.3),0 0 12px rgba(25,216,255,.25) inset}
+.hud-chip svg{width:clamp(24px,7.5vw,42px);height:auto;flex:none;stroke:var(--hc);fill:none;stroke-width:2}
+.hud-chip small{display:block;font-size:clamp(9px,2.5vw,13px);letter-spacing:.12em;white-space:nowrap}
+.hud-chip b{display:block;font-size:clamp(11px,3.2vw,18px);color:#35ff6a;letter-spacing:.06em;text-shadow:0 0 8px #35ff6a;white-space:nowrap}
+.hud-main{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;gap:clamp(8px,2dvh,20px)}
+.hud-core{--core:max(120px,min(66vw,calc(var(--avail) - var(--reserve)),var(--core-max)));position:relative;flex:none;width:var(--core);height:var(--core)}
+.hud-glow{position:absolute;inset:8%;border-radius:50%;background:radial-gradient(circle,rgba(40,150,255,.35) 0,rgba(10,90,220,.18) 45%,transparent 70%)}
+.rg{position:absolute;border-radius:50%;--t:3%;-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - var(--t)),#000 calc(100% - var(--t)));mask:radial-gradient(farthest-side,transparent calc(100% - var(--t)),#000 calc(100% - var(--t)))}
+.rg5{inset:-2%;--t:1.6%;background:repeating-conic-gradient(var(--hc) 0 .7deg,transparent .7deg 3deg);opacity:.8}
+.rg1{inset:2%;--t:1.5%;background:repeating-conic-gradient(var(--hc) 0 10deg,transparent 10deg 13deg);animation:spin 26s linear infinite;will-change:transform}
+.rg2{inset:8%;--t:8%;background:conic-gradient(var(--hc) 0 22%,transparent 22% 26%,var(--hc) 26% 41%,transparent 41% 45%,var(--hc) 45% 61%,transparent 61% 67%,var(--hc) 67% 86%,transparent 86% 90%,var(--hc) 90% 100%);opacity:.7;animation:spin 20s linear infinite reverse;will-change:transform}
+.rg3{inset:15%;--t:1%;background:var(--hc);opacity:.6}
+.rg4{inset:20%;--t:3.2%;background:repeating-conic-gradient(var(--hc) 0 6deg,transparent 6deg 9deg);animation:spin 14s linear infinite;will-change:transform}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hud-brain{position:absolute;left:50%;top:50%;width:44%;height:auto;transform:translate(-50%,-50%);filter:drop-shadow(0 0 10px #1aa0ff);animation:bpulse 2.4s ease-in-out infinite;will-change:transform}
+@keyframes bpulse{50%{transform:translate(-50%,-50%) scale(1.05)}}
+.hud-pad{position:absolute;left:50%;bottom:-5%;width:78%;height:11%;transform:translateX(-50%);border-radius:50%;border:2px solid var(--hc);box-shadow:0 0 16px var(--hc),0 0 20px var(--hc) inset;background:radial-gradient(ellipse,rgba(120,230,255,.7),rgba(10,100,255,.15) 60%,transparent 70%)}
+.hud-panel{display:flex;flex-direction:column;align-items:center;gap:8px;gap:clamp(6px,1.6dvh,16px);width:100%}
+#hudTitle{font-style:italic;font-weight:800;letter-spacing:.04em;font-size:clamp(14px,4.4vw,26px);line-height:1.2;text-shadow:0 0 12px var(--hc);text-align:center}
+#hud.err #hudTitle{color:#ff7886;text-shadow:0 0 12px #ff4d5e}
+.hud-bar{position:relative;width:min(100%,540px);height:26px;height:clamp(22px,4dvh,32px);border:2px solid var(--hc);border-radius:14px;padding:3px;background:rgba(0,10,30,.7);box-shadow:0 0 14px var(--hc),0 0 12px rgba(25,216,255,.5) inset}
+.hud-bar i{position:relative;display:block;height:100%;overflow:hidden;border-radius:9px;transform-origin:left;transform:scaleX(0);background:linear-gradient(90deg,#0a84ff,#19d8ff,#bff6ff);box-shadow:0 0 12px var(--hc)}
+.hud-bar i::after{content:"";position:absolute;inset:0;background:linear-gradient(100deg,transparent 30%,rgba(255,255,255,.55) 50%,transparent 70%);transform:translateX(-100%);animation:sheen 1.6s linear infinite}
+@keyframes sheen{to{transform:translateX(100%)}}
+#hud.err .hud-bar i{background:linear-gradient(90deg,#7a1020,#ff4d5e)}
+#hud.err .hud-bar i::after{display:none}
+.hud-pctrow{display:flex;align-items:center;justify-content:center;gap:14px;width:100%}
+.hud-pctrow .dashes{flex:0 1 100px;width:min(20vw,100px);height:10px;transform:skewX(-35deg);opacity:.85;background:repeating-linear-gradient(90deg,#1c7cff 0 14px,transparent 14px 20px)}
+#hudPct{min-width:3.2ch;text-align:center;font-size:clamp(26px,8vw,40px);line-height:1.1;font-weight:700;font-style:italic;text-shadow:0 0 14px var(--hc)}
+.hud-pillrow{display:flex;align-items:center;justify-content:center;gap:10px;width:min(100%,520px)}
+.chev{color:var(--hc);font-size:clamp(16px,5vw,26px);letter-spacing:-.15em;text-shadow:0 0 8px var(--hc)}
+#hudPill{flex:1;min-width:0;text-align:center;padding:10px 14px;border:1px solid var(--hc);border-radius:12px;background:rgba(0,40,70,.4);color:var(--hc);font-weight:800;letter-spacing:.08em;font-size:clamp(12px,3.4vw,18px);text-shadow:0 0 10px currentColor;box-shadow:0 0 14px rgba(25,216,255,.35) inset}
+#hud.ok #hudPill,#hud.err #hudPill{color:var(--st);border-color:var(--st);box-shadow:0 0 14px var(--st)}
+#hudSub{min-height:1.5em;max-width:100%;text-align:center;overflow-wrap:anywhere;font-size:clamp(11px,3vw,15px);letter-spacing:.18em;color:var(--st);text-shadow:0 0 10px var(--st)}
+#hud.err #hudSub{letter-spacing:.03em;font-size:clamp(10px,2.8vw,14px)}
+body.hud-on #floor,body.hud-on .panel,body.hud-on .light{animation-play-state:paused}
+
+/* Tablet */
+@media (min-width:700px){
+ #hud{--reserve:390px;--core-max:480px}
+ .hud-chip{padding:10px 16px;gap:12px}.hud-chip svg{width:46px}.hud-chip small{font-size:13px}.hud-chip b{font-size:19px}
+ #hudTitle{font-size:clamp(24px,3.6vw,34px)}
+ .hud-bar{width:min(100%,620px);height:36px;border-radius:18px}.hud-bar i{border-radius:12px}
+ #hudPct{font-size:clamp(40px,5.4vw,56px)}
+ #hudPill{padding:12px 18px;font-size:clamp(16px,2.6vw,24px)}.chev{font-size:28px}
+ #hudSub{font-size:16px}#hud.err #hudSub{font-size:15px}
+}
+/* Desktop / laptop */
+@media (min-width:1000px){
+ #hud{--reserve:370px;--core-max:560px}
+ .hud-br{width:clamp(70px,8vw,140px);height:clamp(70px,8vw,140px)}
+ .hud-top{padding:10px}
+ .hud-chip{padding:10px 18px}.hud-chip svg{width:46px}.hud-chip small{font-size:14px}.hud-chip b{font-size:20px}
+ #hudTitle{font-size:clamp(26px,2.2vw,38px);font-size:clamp(22px,min(2.2vw,3.8dvh),38px)}
+ .hud-bar{width:min(100%,640px);height:40px;height:clamp(30px,4.4dvh,40px)}
+ #hudPct{font-size:clamp(44px,3.6vw,64px);font-size:clamp(38px,min(3.6vw,6dvh),64px)}
+ #hudPill{padding:10px 18px;font-size:clamp(18px,1.6vw,26px);font-size:clamp(16px,min(1.6vw,2.6dvh),26px)}
+ #hudSub{font-size:18px}#hud.err #hudSub{font-size:16px}
+}
+@media (min-width:1000px) and (min-height:561px){.hud-side{display:flex}}
+/* Landscape phones: core on the left, status panel on the right */
+@media (orientation:landscape) and (max-height:560px){
+ #hud{--reserve:0px;--core-max:320px}
+ .hud-main{flex-direction:row;gap:clamp(16px,4vw,48px)}
+ .hud-core{--core:max(110px,min(calc(var(--avail) - 64px),36vw,var(--core-max)))}
+ .hud-panel{flex:1 1 0;min-width:0;max-width:480px;width:auto}
+ .hud-top{padding:6px 10px}.hud-chip{padding:5px 9px}.hud-chip svg{width:24px}.hud-chip small{font-size:9px}.hud-chip b{font-size:12px}
+ #hudTitle{font-size:clamp(13px,2.6vw,22px)}
+ .hud-bar{width:100%;height:22px;border-radius:12px;padding:2px}.hud-bar i{border-radius:8px}
+ #hudPct{font-size:clamp(22px,7dvh,38px)}
+ #hudPill{padding:6px 10px;font-size:clamp(11px,2.2vw,16px)}.chev{font-size:16px}
+ #hudSub{font-size:clamp(10px,1.8vw,13px)}
+ .hud-side{display:none}
+}
+@media (prefers-reduced-motion:reduce){#hud *,#hud::before{animation:none!important}#hud,#hud.out{transition-duration:.2s}}
+
+/* ===== Holographic info cards ===== */
+#jc{--hc:#19d8ff;--mh:46vh;position:fixed;z-index:60;display:none;pointer-events:none;box-sizing:border-box;color:#d9f6ff;font-family:"Orbitron","Rajdhani","Eurostile","Segoe UI",system-ui,sans-serif}
+@supports (height:1dvh){#jc{--mh:46dvh}}
+#jc.on{display:flex}
+#jc:not(.side){left:0;right:0;bottom:0;justify-content:center;padding:0 max(10px,var(--safe-right)) max(10px,var(--safe-bottom)) max(10px,var(--safe-left))}
+#jc.side{--mh:100%;top:0;right:0;bottom:0;align-items:center;padding:max(12px,var(--safe-top)) max(12px,var(--safe-right)) max(12px,var(--safe-bottom)) 0;width:calc(min(380px,32vw) + max(12px,var(--safe-right)))}
+@media (orientation:landscape) and (max-height:560px){#jc.side{width:calc(min(380px,44vw) + max(12px,var(--safe-right)))}}
+.jc{pointer-events:auto;position:relative;display:flex;width:100%;max-width:560px;max-height:var(--mh);filter:drop-shadow(0 0 8px rgba(25,216,255,.5))}
+.jc-frame{flex:1;min-width:0;min-height:0;display:flex;padding:2px;background:var(--hc);clip-path:polygon(0 20px,20px 0,calc(100% - 34px) 0,100% 34px,100% calc(100% - 20px),calc(100% - 20px) 100%,34px 100%,0 calc(100% - 34px))}
+.jc-body{position:relative;flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:linear-gradient(160deg,rgba(6,48,100,.86),rgba(2,14,34,.92));clip-path:polygon(0 19px,19px 0,calc(100% - 33px) 0,100% 33px,100% calc(100% - 19px),calc(100% - 19px) 100%,33px 100%,0 calc(100% - 33px));-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.jc-tab{position:absolute;top:0;left:0;z-index:2;max-width:calc(100% - 130px);padding:9px 34px 9px 22px;background:var(--hc);color:#02202e;font-weight:800;font-style:italic;font-size:clamp(12px,3.4vw,15px);letter-spacing:.08em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;clip-path:polygon(0 0,100% 0,calc(100% - 16px) 100%,0 100%)}
+.jc-x,.jc-snd{position:absolute;top:2px;z-index:3;width:44px;height:44px;display:grid;place-items:center;border:0;background:none;color:var(--hc);font:inherit;cursor:pointer}
+.jc-x{right:34px;font-size:28px;line-height:1}.jc-snd{right:78px;font-size:11px;letter-spacing:.06em}
+.jc-snd.off{opacity:.45;text-decoration:line-through}
+.jc-x:hover,.jc-snd:hover{text-shadow:0 0 8px var(--hc)}.jc-x:focus-visible,.jc-snd:focus-visible,.jc-err button:focus-visible{outline:2px solid var(--hc);outline-offset:-4px}
+.jc-hatch{position:absolute;right:36px;bottom:0;width:88px;height:7px;background:repeating-linear-gradient(-45deg,var(--hc) 0 3px,transparent 3px 7px);opacity:.8;pointer-events:none}
+.jc-scan{position:absolute;left:0;right:0;top:0;height:40%;background:linear-gradient(180deg,transparent,rgba(25,216,255,.35),transparent);opacity:0;pointer-events:none}
+.jc-content{min-height:0;overflow:auto;overscroll-behavior:contain;padding:54px 20px 24px}
+.jc-content small{display:block;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#7fd8f0}
+.jc-content b{font-weight:700}
+.kv{display:grid;grid-template-columns:1fr 1fr;gap:12px 16px;margin-top:16px}
+.na{font-style:normal;color:#ffb347}
+.jc-load{font-size:13px;letter-spacing:.14em;color:#9fe8ff;animation:jcp 1s ease-in-out infinite alternate}
+@keyframes jcp{to{opacity:.35}}
+.w-main{display:flex;align-items:center;gap:14px}.w-ic{font-size:clamp(38px,10vw,52px)}
+.w-t{font-size:clamp(36px,9vw,52px);font-weight:800;line-height:1;text-shadow:0 0 12px var(--hc)}.w-c{margin-top:4px;font-size:15px;color:#9fe8ff}
+.ck-t{font-size:clamp(32px,9vw,48px);font-weight:800;font-variant-numeric:tabular-nums;text-shadow:0 0 12px var(--hc)}.ck-d{margin-top:6px;color:#9fe8ff}
+.cu-main{font-size:clamp(20px,5.6vw,30px);font-weight:800;line-height:1.25}.cu-main span{color:var(--hc);text-shadow:0 0 10px var(--hc)}
+.nw{padding:12px 0;border-top:1px solid rgba(25,216,255,.25)}.nw:first-child{border:0;padding-top:0}
+.nw img{display:block;width:100%;max-height:140px;object-fit:cover;border-radius:6px;margin-bottom:8px}
+.nw h4{margin:0 0 4px;font-size:15px;line-height:1.3}.nw p{margin:0 0 6px;font-family:system-ui,sans-serif;font-size:13px;color:#b9ecfb}
+.nw em{font-style:normal;font-size:11px;color:#7fd8f0}.nw a{color:var(--hc);text-decoration:none}.nw .more{display:inline-block;margin:6px 0 0 8px;padding:6px 0;font-size:11px;letter-spacing:.1em}
+.jc-err{display:grid;gap:14px;justify-items:start}.jc-err b{color:#ff8b97;font-weight:600}
+.jc-err button{min-height:44px;padding:0 22px;border:1px solid var(--hc);border-radius:8px;background:rgba(25,216,255,.12);color:var(--hc);font:inherit;font-weight:700;letter-spacing:.1em;cursor:pointer}
+.jc.in{animation:jcIn .5s cubic-bezier(.2,.8,.2,1) both}
+.jc.in .jc-frame{animation:jcFr .7s ease-out both}
+.jc.in .jc-scan{animation:jcScan .9s ease-out both}
+.jc.out{animation:jcOut .28s ease-in both}
+.jc.out .jc-scan{animation:jcScan .28s ease-in reverse both}
+@keyframes jcIn{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:none}}
+@keyframes jcFr{0%{opacity:0}35%{opacity:1}50%{opacity:.5}100%{opacity:1}}
+@keyframes jcScan{0%{transform:translateY(-100%);opacity:1}100%{transform:translateY(260%);opacity:0}}
+@keyframes jcOut{to{opacity:0;transform:scale(.94)}}
+@media (prefers-reduced-motion:reduce){.jc.in{animation:jcFade .15s both}.jc.out{animation:jcOut .15s both}.jc.in .jc-frame,.jc-scan{animation:none!important}.jc-load{animation:none}@keyframes jcFade{from{opacity:0}to{opacity:1}}}
+</style>
+</head>
+<body class="hud-on">
+<div id="hud" role="progressbar" aria-label="Loading AI system" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+<div class="hud-grid"></div>
+<i class="hud-br tl"></i><i class="hud-br tr"></i><i class="hud-br bl"></i><i class="hud-br brr"></i>
+<div class="hud-side l"><b></b><b></b><b></b><b></b><b></b><b></b></div>
+<div class="hud-side r"><b></b><b></b><b></b><b></b><b></b><b></b></div>
+<div class="hud-top">
+<div class="hud-chip"><svg viewBox="0 0 44 44" aria-hidden="true"><rect x="11" y="11" width="22" height="22" rx="3"/><rect x="17" y="17" width="10" height="10"/><path d="M16 11V5M22 11V5M28 11V5M16 33v6M22 33v6M28 33v6M11 16H5M11 22H5M11 28H5M33 16h6M33 22h6M33 28h6"/></svg><div><small>AI CORE</small><b>ONLINE</b></div></div>
+<div class="hud-chip"><svg viewBox="0 0 60 30" aria-hidden="true"><polyline points="0,15 12,15 17,4 23,26 29,8 34,15 60,15"/></svg><div><small>STATUS</small><b>ACTIVE</b></div></div>
+</div>
+<div class="hud-main">
+<div class="hud-core">
+<div class="hud-glow"></div><i class="rg rg5"></i><i class="rg rg1"></i><i class="rg rg2"></i><i class="rg rg3"></i><i class="rg rg4"></i>
+<svg class="hud-brain" viewBox="0 0 200 170" aria-hidden="true"><defs><radialGradient id="hbg" cx="50%" cy="45%" r="60%"><stop offset="0" stop-color="#4cc2ff" stop-opacity=".55"/><stop offset="1" stop-color="#0a4bd0" stop-opacity=".15"/></radialGradient><g id="hl"><path d="M100 18C70 6 34 24 27 56C14 66 11 96 27 109C24 131 50 152 78 147C90 162 98 152 100 146Z" fill="url(#hbg)" stroke="#6fd6ff" stroke-width="2"/><path d="M44 60C58 48 74 62 88 50M34 86C54 74 70 92 92 80M47 113C61 101 77 119 93 109M70 33C65 50 80 58 76 72M58 130C69 119 82 129 91 122" fill="none" stroke="#8fe3ff" stroke-width="1.6" stroke-linecap="round"/><circle cx="44" cy="60" r="2.4" fill="#e6faff"/><circle cx="92" cy="80" r="2.4" fill="#e6faff"/><circle cx="47" cy="113" r="2.4" fill="#e6faff"/><circle cx="76" cy="72" r="2.4" fill="#e6faff"/></g></defs><use href="#hl"/><use href="#hl" transform="translate(200 0) scale(-1 1)"/></svg>
+<div class="hud-pad"></div>
+</div>
+<div class="hud-panel">
+<div id="hudTitle">INITIALIZING AI SYSTEM...</div>
+<div class="hud-bar"><i id="hudBar"></i></div>
+<div class="hud-pctrow"><span class="dashes"></span><span id="hudPct">0%</span><span class="dashes"></span></div>
+<div class="hud-pillrow"><span class="chev">&raquo;&raquo;</span><div id="hudPill">LOADING AVATAR</div><span class="chev">&laquo;&laquo;</span></div>
+<div id="hudSub"></div>
+</div>
+</div>
+</div>
+<script>
+// Safety net: if the 3D engine itself cannot start (CDN blocked / offline), never leave the user stuck on the loader.
+(function () {
+  var done = false;
+  function fail(msg) {
+    if (window.__hudReady || done) return; done = true;
+    var h = document.getElementById("hud"); if (!h) return;
+    h.classList.add("err");
+    document.getElementById("hudTitle").textContent = "AVATAR LOAD FAILED";
+    document.getElementById("hudPill").textContent = "ENGINE UNAVAILABLE";
+    document.getElementById("hudSub").textContent = msg;
+    setTimeout(function () { h.classList.add("out"); setTimeout(function () { h.remove(); document.body.classList.remove("hud-on"); }, 900); }, 3800);
+  }
+  window.addEventListener("error", function (e) { if (e.target && e.target.tagName === "SCRIPT") fail("The 3D engine could not be loaded. Check your connection."); }, true);
+  setTimeout(function () { fail("The 3D engine took too long to start. Check your connection."); }, 40000);
+})();
+</script>
+<div id="background"></div>
+<div id="floor"></div>
+<div class="panel p1"></div><div class="panel p2"></div><div class="panel p3"></div>
+<div class="light light1"></div><div class="light light2"></div>
+<div id="overlay"></div>
+<div id="avatarContainer"></div>
+<div id="voiceGlow"></div>
+<button id="gate" type="button" aria-label="Start assistant"><i></i><span id="gateText">Tap to start</span></button>
+<div id="toast" role="status" aria-live="polite"></div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.0.0/lib/three-vrm.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+import { createAvaClient } from "./ava-client.js";
+
+/* ===== ai ===== */
+// Chat goes through AVA Backend V1 (Gemini Live over WebSocket). Transport: ./ava-client.js, backend URL: ./ava-config.js.
+// askAI keeps its original contract: user text in, reply text out (the server keeps the conversation context).
+export async function askAI(message) {
+  const reply = await ava.ask(message);
+  if (typeof reply !== "string" || !reply.trim()) throw new Error("Invalid AI response");
+  return reply;
+}
+
+/* ===== avatar ===== */
+
+const MODEL_PATH = "./assets/models/lady_avatar_v3.vrm";
+
+const PIXEL_BUDGET = 2.6e6; // max rendered pixels, keeps mobile GPUs smooth
+
+function readInsets(el) {
+  const cs = getComputedStyle(el);
+  return { top: parseFloat(cs.paddingTop) || 0, bottom: parseFloat(cs.paddingBottom) || 0 };
+}
+
+function createStage(container) {
+  const canvas = document.createElement("canvas");
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: "high-performance" });
+  } catch (e) {
+    throw new Error("WebGL is not available on this device or browser.");
+  }
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
+  container.appendChild(canvas);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(26, 1, 0.01, 100);
+  scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+  const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(0.5, 2, 4); scene.add(key);
+  const rim = new THREE.DirectionalLight(0x00cfff, 1.6); rim.position.set(-3, 2, -2); scene.add(rim);
+  const fill = new THREE.DirectionalLight(0x4466ff, 0.8); fill.position.set(3, 1, 1); scene.add(fill);
+
+  let last = "";
+  const stage = { renderer, scene, camera, metrics: null, view: null, reserve: { right: 0, bottom: 0 },
+    // Recomputes size, pixel ratio and framing only when something actually changed.
+    resize(force) {
+      const w = Math.max(1, Math.round(container.clientWidth || window.innerWidth));
+      const h = Math.max(1, Math.round(container.clientHeight || window.innerHeight));
+      const dpr = window.devicePixelRatio || 1, ins = readInsets(container);
+      const rs = stage.reserve, sig = [w, h, dpr, ins.top, ins.bottom, rs.right, rs.bottom].join("|");
+      if (!force && sig === last) return;
+      last = sig;
+      renderer.setPixelRatio(Math.max(1, Math.min(dpr, 2, Math.sqrt(PIXEL_BUDGET / (w * h)))));
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      stage.view = { w, h, top: ins.top, bottom: Math.max(ins.bottom, rs.bottom), right: rs.right };
+      if (stage.metrics) applyFraming(camera, stage.metrics, stage.view);
+      else camera.updateProjectionMatrix();
+    },
+    dispose() { renderer.dispose(); canvas.remove(); }
+  };
+  stage.resize(true);
+  return stage;
+}
+
+function loadAvatar(stage, onProgress) {
+  const loader = new GLTFLoader();
+  loader.register((p) => new VRMLoaderPlugin(p));
+  return new Promise((resolve, reject) => {
+    loader.load(MODEL_PATH, (gltf) => {
+      try {
+        const vrm = gltf.userData.vrm;
+        if (!vrm) return reject(new Error("File loaded but contains no VRM data: " + MODEL_PATH));
+        VRMUtils.removeUnnecessaryVertices(gltf.scene);
+        if (VRMUtils.combineSkeletons) VRMUtils.combineSkeletons(gltf.scene);
+        VRMUtils.rotateVRM0(vrm); // faces camera for VRM0; no-op for VRM1
+        vrm.scene.traverse((o) => { o.frustumCulled = false; });
+        stage.scene.add(vrm.scene);
+        stage.metrics = measure(vrm);
+        applyFraming(stage.camera, stage.metrics, stage.view);
+        resolve(vrm);
+      } catch (e) { reject(e); }
+    }, (p) => onProgress && onProgress(p.loaded, p.total),
+    (err) => reject(new Error("Could not load VRM at " + MODEL_PATH + " (" + ((err && err.message) || "network/path error") + ")")));
+  });
+}
+
+// Centre the model once and measure the head-to-waist region from the real rig.
+function measure(vrm) {
+  const root = vrm.scene;
+  root.updateMatrixWorld(true);
+  const wp = (n) => { const o = vrm.humanoid.getNormalizedBoneNode(n); return o ? o.getWorldPosition(new THREE.Vector3()) : null; };
+  const hips = wp("hips"), head = wp("head");
+  const l = wp("leftUpperArm"), r = wp("rightUpperArm");
+  if (hips && head && head.y - hips.y > 0.05) {
+    // Bone-based: independent of hair, hidden meshes or odd model scale.
+    root.position.x -= hips.x;
+    root.updateMatrixWorld(true);
+    const span = l && r ? Math.abs(l.x - r.x) : (head.y - hips.y) * 0.65;
+    let maxY = NaN;
+    try { maxY = new THREE.Box3().setFromObject(root).max.y; } catch (e) {}
+    const lh = wp("leftHand"), rh = wp("rightHand");
+    const handY = lh && rh ? Math.min(lh.y, rh.y) : NaN;
+    // Lowest fingertip joint (finger bones are optional in VRM)
+    const tips = [];
+    ["Thumb", "Index", "Middle", "Ring", "Little"].forEach((f) => ["left", "right"].forEach((sd) => { const v = wp(sd + f + "Distal"); if (v) tips.push(v.y); }));
+    const fingerY = tips.length ? Math.min.apply(null, tips) : NaN;
+    return regionFromBones(hips.y, head.y, span, maxY, handY, fingerY);
+  }
+  // Fallback: bounding box
+  let box = new THREE.Box3().setFromObject(root);
+  const H = box.max.y - box.min.y;
+  if (!Number.isFinite(H) || H < 0.01) throw new Error("VRM has invalid dimensions");
+  root.position.x -= (box.min.x + box.max.x) / 2;
+  root.updateMatrixWorld(true);
+  return regionFromRig(H, box.max.y, box.min.y + H * 0.55, H * 0.22);
+}
+
+// Head-to-waist region from the head and hips bones.
+function regionFromBones(hipsY, headY, span, maxY, handY, fingerY) {
+  const up = headY - hipsY;
+  // Head top: real mesh top (hair, goggles, bun) when sane, else a proportional estimate.
+  let top = headY + up * 0.5;
+  if (Number.isFinite(maxY)) top = Math.min(Math.max(maxY + up * 0.02, headY + up * 0.3), headY + up * 0.9);
+  let bottom = hipsY + up * 0.08; // just below the belt line = waist
+  // Keep hands and fingers fully in frame: wrist minus a full hand length, or the lowest finger joint minus the fingertip.
+  if (Number.isFinite(handY)) bottom = Math.min(bottom, handY - up * 0.4);
+  if (Number.isFinite(fingerY)) bottom = Math.min(bottom, fingerY - up * 0.1);
+  return { regionH: top - bottom, regionW: span + up * 0.62, centerY: (top + bottom) / 2 };
+}
+
+// Head-to-waist region. Width = shoulder span + room for the arms hanging at the sides.
+function regionFromRig(H, maxY, hipsY, span) {
+  const top = maxY + H * 0.02, bottom = hipsY - H * 0.02;
+  return { regionH: top - bottom, regionW: span + H * 0.16, centerY: (top + bottom) / 2 };
+}
+
+// Pure framing maths (no THREE) so it can be tested at any viewport.
+// Fits the head-to-waist region inside the safe area for both width and height,
+// then biases the composition upward when there is spare vertical room (tall portrait screens).
+function computeFraming(m, fovDeg, w, h, top, bottom, right) {
+  right = right || 0;
+  const t = Math.tan(fovDeg * Math.PI / 360);
+  const aspect = w / h;
+  const uw = Math.max(w - right, w * 0.4);              // width left for the avatar when a card sits beside it
+  const uh = Math.max(h - top - bottom, h * 0.35);      // height left when a card sits below it
+  const mh = aspect >= 1 ? 1.14 : 1.06;                 // horizontal breathing room
+  const mv = 1.14;                                      // vertical breathing room
+  const dV = (m.regionH * mv / 2) / t * (h / uh);
+  const dH = (m.regionW * mh / 2) / (t * (uw / h));
+  const d = Math.max(dV, dH);
+  const wpp = (2 * d * t) / h;                          // world units per screen pixel
+  const regionPx = m.regionH / wpp;
+  const slack = Math.max(uh - regionPx, 0);
+  const yc = top + regionPx / 2 + slack * 0.22;         // region centre, px from top
+  return { d, targetX: (right / 2) * wpp, targetY: m.centerY + (yc - h / 2) * wpp, regionPx, regionWpx: m.regionW / wpp, yc };
+}
+
+function applyFraming(camera, m, v) {
+  const r = computeFraming(m, camera.fov, v.w, v.h, v.top, v.bottom, v.right);
+  camera.position.set(r.targetX, r.targetY, r.d);
+  camera.lookAt(r.targetX, r.targetY, 0);
+  camera.userData.framing = r;
+  camera.near = r.d / 50; camera.far = r.d * 20;
+  camera.updateProjectionMatrix();
+}
+
+function disposeAvatar(stage, vrm) {
+  if (!vrm) return;
+  stage.scene.remove(vrm.scene);
+  VRMUtils.deepDispose(vrm.scene);
+}
+
+/* ===== voice ===== */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const supported = { recognition: !!SR, synthesis: "speechSynthesis" in window };
+const VOWELS = { a: "aa", e: "ee", i: "ih", o: "oh", u: "ou", y: "ih" };
+const LABIAL = "bmpfv";
+const CYCLE = ["aa", "oh", "ee", "ih"];
+
+class Voice {
+  constructor(cb) {
+    this.cb = cb; this.rate = 1; this.want = false; this.active = false; this.speaking = false;
+    this.paused = false; this.denied = false; this.timeline = []; this.idx = 0; this.backoff = 600; this.voice = null;
+    if (SR) {
+      const r = (this.rec = new SR());
+      r.lang = "hi-IN"; r.continuous = true; r.interimResults = false;
+      r.onstart = () => { this.active = true; this.backoff = 600; };
+      r.onend = () => { this.active = false; this.schedule(); };
+      r.onerror = (e) => {
+        if (e.error === "not-allowed" || e.error === "service-not-allowed") { this.denied = true; this.want = false; cb.onError("mic-denied"); }
+        else if (e.error === "network") { this.backoff = Math.min(this.backoff * 2, 8000); cb.onError("recognition-network"); }
+      };
+      r.onresult = (e) => {
+        if (this.speaking || this.paused) return;
+        const res = e.results[e.results.length - 1];
+        if (!res.isFinal) return;
+        const text = res[0].transcript.trim();
+        if (text) cb.onTranscript(text);
+      };
+    }
+    if (supported.synthesis) {
+      const load = () => { this.voice = pickVoice(); };
+      load(); speechSynthesis.addEventListener("voiceschanged", load);
+    }
+  }
+
+  // Explicit permission prompt; the stream is released at once so only one mic session (SpeechRecognition) stays open.
+  async enableMic() {
+    if (!SR || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("unsupported");
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach((t) => t.stop());
+    this.denied = false;
+  }
+  unlockSpeech() { if (supported.synthesis) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } }
+
+  start() { this.want = true; this.schedule(0); }
+  pause() { this.paused = true; this.halt(); }
+  resume() { this.paused = false; this.schedule(700); }
+  halt() { clearTimeout(this.timer); if (this.rec && this.active) { try { this.rec.abort(); } catch (e) {} } }
+  schedule(ms = this.backoff) {
+    clearTimeout(this.timer);
+    if (!this.rec || !this.want || this.speaking || this.paused || this.denied) return;
+    this.timer = setTimeout(() => {
+      if (!this.active && this.want && !this.speaking && !this.paused) { try { this.rec.start(); } catch (e) {} }
+    }, ms);
+  }
+  stopAll() { this.want = false; this.halt(); if (supported.synthesis) speechSynthesis.cancel(); this.speaking = false; this.timeline = []; }
+
+  // Current viseme from the plan built from the spoken text; null = mouth closed.
+  viseme() {
+    if (!this.speaking) return null;
+    const now = performance.now(), tl = this.timeline;
+    while (this.idx < tl.length && tl[this.idx].e < now) this.idx++;
+    const c = tl[this.idx];
+    return c && c.s <= now && c.v ? c : null;
+  }
+
+  // Timeline from the text being spoken; re-synced on every word-boundary event the engine fires.
+  plan(text, from = 0) {
+    const ms = 62 / this.rate, tl = []; let t = performance.now();
+    for (let i = from; i < text.length; i++) {
+      const c = text[i].toLowerCase(); let v = null, w = 0, d = ms;
+      if (VOWELS[c]) { v = VOWELS[c]; w = 0.6 + ((i * 7) % 4) * 0.1; d = ms * 1.6; }
+      else if (/[,;:.!?।]/.test(c)) d = 230 / this.rate;
+      else if (c === " " || c === "\n") d = ms * 0.5;
+      else if (LABIAL.includes(c)) d = ms * 0.8;
+      else if (/[a-z]/.test(c)) { v = "ih"; w = 0.18; }
+      else { v = CYCLE[i % 4]; w = 0.5; d = ms * 1.4; } // non-Latin scripts (e.g. Devanagari)
+      tl.push({ s: t, e: t + d, v, w }); t += d;
+    }
+    this.timeline = tl; this.idx = 0;
+  }
+
+  speak(text) {
+    return new Promise((resolve) => {
+      if (!supported.synthesis) return resolve();
+      speechSynthesis.cancel(); this.halt();
+      this.speaking = true; this.cb.onSpeaking(true);
+      const chunks = text.match(/[^.!?।\n]+[.!?।]*/g) || [text];
+      let i = 0, finished = false;
+      const finish = () => {
+        if (finished) return; finished = true;
+        this.speaking = false; this.timeline = []; this.cb.onSpeaking(false); resolve();
+      };
+      const next = () => {
+        if (finished) return;
+        if (i >= chunks.length) return finish();
+        const chunk = chunks[i++].trim(); if (!chunk) return next();
+        const u = new SpeechSynthesisUtterance(chunk);
+        u.lang = "hi-IN"; u.rate = this.rate; u.pitch = 1.05;
+        if (this.voice) { u.voice = this.voice; u.lang = this.voice.lang; }
+        let done = false;
+        const go = () => { if (done) return; done = true; clearTimeout(wd); next(); };
+        const wd = setTimeout(go, chunk.length * 130 / this.rate + 4000); // watchdog for engines that never fire onend
+        u.onstart = () => this.plan(chunk);
+        u.onboundary = (e) => { if (typeof e.charIndex === "number") this.plan(chunk, e.charIndex); };
+        u.onend = go;
+        u.onerror = (e) => { if (e.error === "interrupted" || e.error === "canceled") { done = true; clearTimeout(wd); finish(); } else go(); };
+        speechSynthesis.speak(u);
+      };
+      next();
+    });
+  }
+}
+
+function pickVoice() {
+  const vs = speechSynthesis.getVoices(); if (!vs.length) return null;
+  const female = /female|swara|heera|kalpana|lekha|neerja|zira|samantha|google (हिन्दी|hindi)/i;
+  const hi = vs.filter((v) => /^hi/i.test(v.lang)), inn = vs.filter((v) => /^en-IN/i.test(v.lang));
+  return hi.find((v) => female.test(v.name)) || hi[0] || inn.find((v) => female.test(v.name)) || inn[0] || null;
+}
+
+/* ===== animation ===== */
+const { lerp, damp } = THREE.MathUtils;
+const BONES = ["spine","chest","upperChest","neck","head","leftShoulder","rightShoulder","leftUpperArm","rightUpperArm","leftLowerArm","rightLowerArm","leftHand","rightHand"];
+const EXPR = ["blink","happy","relaxed","aa","ih","ou","ee","oh"];
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+class Animator {
+  constructor(vrm, camera) {
+    this.vrm = vrm; this.camera = camera; this.t = 0; this.state = "idle";
+    const h = vrm.humanoid, em = vrm.expressionManager;
+    this.b = {}; BONES.forEach((n) => (this.b[n] = h.getNormalizedBoneNode(n) || null)); // missing bones skipped safely
+    this.has = {}; this.cur = {};
+    EXPR.forEach((n) => { if (em && em.getExpression(n)) { this.has[n] = true; this.cur[n] = 0; } });
+    const missing = EXPR.filter((n) => !this.has[n]);
+    if (missing.length) console.warn("VRM lacks expressions (skipped):", missing.join(", "));
+    this.blinkAt = 2; this.blinkT = -1;
+    this.gazeNext = 0; this.gx = 0; this.gy = 0; this.tgx = 0; this.tgy = 0;
+    this.gaze = new THREE.Object3D();
+    if (vrm.scene.parent) vrm.scene.parent.add(this.gaze);
+    if (vrm.lookAt) vrm.lookAt.target = this.gaze;
+    this.head = { x: 0, y: 0, z: 0 };
+    const sgn = (v, d) => (Math.abs(v) > 1e-5 ? Math.sign(v) : d);
+    const lla = this.b.leftLowerArm, rla = this.b.rightLowerArm, toes = h.getNormalizedBoneNode("leftToes");
+    this.sL = lla ? sgn(lla.position.x, 1) : 1; this.sR = rla ? sgn(rla.position.x, -1) : -1;
+    this.front = toes && Math.abs(toes.position.z) > 1e-4 ? Math.sign(toes.position.z) : (vrm.meta && vrm.meta.metaVersion === "0" ? -1 : 1);
+    this.q = this.rest(); this.p = this.rest();
+    this.gestureAt = 1; this.gestureOn = false; this.mouth = 0;
+  }
+  rest() { const a = 1.38, e = 0.14; return { luz: -this.sL * a, ruz: -this.sR * a, lux: 0, rux: 0, lly: -this.front * this.sL * e, rly: -this.front * this.sR * e, hand: 0 }; }
+
+  newGesture() {
+    const q = this.rest(), right = Math.random() < 0.65, s = right ? this.sR : this.sL, c = right ? "r" : "l";
+    q[c + "uz"] = -s * rnd(1.22, 1.36);
+    q[c + "ux"] = rnd(-0.3, 0.1);
+    q[c + "ly"] = -this.front * s * rnd(0.7, 1.25);
+    q.hand = right ? 1 : -1;
+    if (Math.random() < 0.3) { q.luz = -this.sL * 1.25; q.lly = -this.front * this.sL * 0.9; q.ruz = -this.sR * 1.25; q.rly = -this.front * this.sR * 0.9; q.hand = 2; }
+    this.q = q;
+  }
+
+  update(dt, lip) {
+    this.t += dt;
+    const t = this.t, s = this.state, speaking = s === "speaking";
+    this.mouth = lerp(this.mouth, lip ? lip.w : 0, 1 - Math.exp(-dt * 10));
+
+    if (speaking) {
+      if (t > this.gestureAt) {
+        if (this.gestureOn) { this.q = this.rest(); this.gestureOn = false; this.gestureAt = t + rnd(0.5, 1.4); }
+        else { this.newGesture(); this.gestureOn = true; this.gestureAt = t + rnd(1.6, 3.0); }
+      }
+    } else { this.q = this.rest(); this.gestureOn = false; this.gestureAt = t + 0.6; }
+    for (const key in this.q) this.p[key] = damp(this.p[key], this.q[key], 3.2, dt);
+
+    const br = Math.sin(t * 1.6), p = this.p, B = this.b;
+    const set = (n, x, y, z) => { if (B[n]) B[n].rotation.set(x, y, z); };
+    set("spine", 0.01 + br * 0.008, Math.sin(t * 0.35) * 0.02, Math.sin(t * 0.27) * 0.01);
+    set("chest", br * 0.014, 0, 0);
+    set("upperChest", br * 0.01, 0, 0);
+    set("leftShoulder", 0, 0, -br * 0.01); set("rightShoulder", 0, 0, br * 0.01);
+    set("leftUpperArm", p.lux, 0, p.luz + Math.sin(t * 1.3) * 0.012 + br * 0.006);
+    set("rightUpperArm", p.rux, 0, p.ruz - Math.sin(t * 1.3) * 0.012 - br * 0.006);
+    set("leftLowerArm", 0, p.lly, 0); set("rightLowerArm", 0, p.rly, 0);
+    const wave = speaking ? Math.sin(t * 3.2) * 0.18 : 0;
+    set("leftHand", 0, 0, p.hand === -1 || p.hand === 2 ? wave : 0);
+    set("rightHand", 0, 0, p.hand === 1 || p.hand === 2 ? -wave : 0);
+
+    const th = { x: Math.sin(t * 0.7) * 0.02, y: Math.sin(t * 0.5) * 0.05, z: 0 };
+    if (s === "listening") { th.z = 0.06; th.x += 0.02 + Math.sin(t * 1.1) * 0.015; }
+    else if (s === "thinking") { th.z = -0.08; th.y -= 0.14; th.x -= 0.09; }
+    else if (speaking) { th.x += Math.sin(t * 4.6) * 0.025 * (0.4 + this.mouth); th.y += Math.sin(t * 1.9) * 0.04; }
+    for (const a of ["x", "y", "z"]) this.head[a] = damp(this.head[a], th[a], 4, dt);
+    set("head", this.head.x * 0.6, this.head.y * 0.6, this.head.z * 0.6);
+    set("neck", this.head.x * 0.4, this.head.y * 0.4, this.head.z * 0.4);
+
+    if (t > this.gazeNext) {
+      this.gazeNext = t + rnd(1.2, 3.5);
+      const away = s === "thinking";
+      this.tgx = (away ? -0.35 : 0) + rnd(-0.12, 0.12); this.tgy = (away ? 0.22 : 0) + rnd(-0.06, 0.06);
+    }
+    this.gx = damp(this.gx, this.tgx, 8, dt); this.gy = damp(this.gy, this.tgy, 8, dt);
+    const cp = this.camera.position;
+    this.gaze.position.set(cp.x + this.gx, cp.y + 0.05 + this.gy, cp.z);
+
+    this.blinkAt -= dt; let blink = 0;
+    if (this.blinkAt <= 0 && this.blinkT < 0) this.blinkT = 0;
+    if (this.blinkT >= 0) {
+      this.blinkT += dt; blink = Math.sin(Math.PI * Math.min(this.blinkT / 0.2, 1));
+      if (this.blinkT >= 0.2) { this.blinkT = -1; this.blinkAt = Math.random() < 0.2 ? 0.15 : rnd(2, 5); }
+    }
+
+    const tg = { blink, happy: speaking ? 0.35 : s === "listening" ? 0.15 : 0.08, relaxed: s === "thinking" ? 0.35 : 0, aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
+    if (lip && lip.v) {
+      const v = this.has[lip.v] ? lip.v : this.has.aa ? "aa" : null; // fallback if viseme missing
+      if (v) tg[v] = lip.w * (v === lip.v ? 0.9 : 0.6);
+    }
+    const em = this.vrm.expressionManager;
+    for (const n in this.cur) {
+      this.cur[n] = damp(this.cur[n], tg[n], n === "blink" ? 30 : n.length === 2 ? 22 : 5, dt);
+      em.setValue(n, this.cur[n]);
+    }
+  }
+  dispose() { this.gaze.removeFromParent(); }
+}
+
+/* ===== main ===== */
+
+const gate = document.getElementById("gate"), gateText = document.getElementById("gateText"), toastEl = document.getElementById("toast");
+let toastTimer;
+function toast(msg, ms = 4500) { toastEl.textContent = msg; toastEl.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove("show"), ms); }
+function showGate(msg) { gateText.textContent = msg; gate.hidden = false; }
+
+let stage, vrm, animator, voice, raf = 0, last = 0, busy = false, resizeRaf = 0, ro = null;
+const FALLBACK = "Sorry, connection mein problem aa rahi hai.";
+
+// ===== HUD loading screen controller =====
+const hud = (() => {
+  const g = (id) => document.getElementById(id);
+  const el = g("hud"), bar = g("hudBar"), pct = g("hudPct"), title = g("hudTitle"), pill = g("hudPill"), sub = g("hudSub");
+  if (!el) return { set() {}, success() {}, fail() {} };
+  window.__hudReady = true;
+  const t0 = performance.now();
+  let shown = 0, target = 0, prev = t0, raf = 0, pending = null, lastInt = -1;
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    const dt = Math.min((now - prev) / 1000, 0.1); prev = now;
+    if (shown < target) shown = Math.min(target, shown + Math.max((target - shown) * 3.5, 25) * dt); // never moves backwards
+    bar.style.transform = "scaleX(" + shown / 100 + ")";
+    const n = Math.floor(shown);
+    if (n !== lastInt) { lastInt = n; pct.textContent = n + "%"; el.setAttribute("aria-valuenow", String(n)); }
+    if (pending && shown >= 99.99 && now - t0 >= 1500) { const f = pending; pending = null; f(); } // show 100% for a moment even on fast loads
+  }
+  function leave(delay) {
+    setTimeout(() => { el.classList.add("out"); setTimeout(() => { cancelAnimationFrame(raf); el.remove(); document.body.classList.remove("hud-on"); }, 900); }, delay);
+  }
+  raf = requestAnimationFrame(frame);
+  return {
+    set(p) { if (!pending) target = Math.max(target, Math.min(p, 99)); },
+    success() {
+      target = 100;
+      pending = () => { el.classList.add("ok"); pill.textContent = "SYSTEM ACTIVATED"; sub.textContent = "ACCESS GRANTED \u2022 READY"; leave(1300); };
+    },
+    fail(msg) {
+      pending = null; el.classList.add("err");
+      title.textContent = "AVATAR LOAD FAILED"; pill.textContent = "CONTINUING WITHOUT AVATAR";
+      sub.textContent = String(msg || "Unknown error").slice(0, 160); leave(3800);
+    }
+  };
+})();
+
+// Real download progress: 6% -> 90%. If the server sends no total size, estimate from bytes received.
+function onModelProgress(loaded, total) {
+  const f = total > 0 ? Math.min(loaded / total, 1) : 1 - Math.exp(-loaded / 8e6);
+  hud.set(6 + f * 84);
+}
+function setState(s) { if (animator) animator.state = s; }
+
+// ===== Holographic information cards =====
+const CFG = window.AVA_CONFIG || {};
+const TITLES = { weather: "WEATHER", news: "NEWS", currency: "CURRENCY", clock: "TIME", search: "SEARCH RESULTS" };
+
+// <intent>
+const CUR = { usd: "USD", dollar: "USD", dollars: "USD", doller: "USD", "डॉलर": "USD", "ડોલર": "USD", inr: "INR", rupee: "INR", rupees: "INR", rupaye: "INR", rupiya: "INR", rupya: "INR", "रुपये": "INR", "रुपया": "INR", "રૂપિયા": "INR", eur: "EUR", euro: "EUR", euros: "EUR", "यूरो": "EUR", gbp: "GBP", pound: "GBP", pounds: "GBP", "पाउंड": "GBP", jpy: "JPY", yen: "JPY", aed: "AED", dirham: "AED", "दिरहम": "AED" };
+const STOP = new Set(("jarvis aaj abhi ka ki ke mein me in of for at the batao bataiye bolo btao tell please what is how today s current now kitna kitne kitni hai hain ho hota hote kya time weather mausam samay news khabar search karo kar latest are show give da de " +
+  "जार्विस आज अभी का की के में मौसम बताओ बताइए बोलो कितना कितने है हैं समय टाइम खबर समाचार खोजो खोज करो " +
+  "જાર્વિસ આજે હમણાં નું ની ના માં હવામાન મોસમ કહો બતાવો કેટલો કેટલા છે સમય સમાચાર શોધો શોધ કરો").split(" "));
+const words = (t) => t.replace(/[^\p{L}\p{M}\p{N}.,\s]/gu, " ").split(/\s+/).map((w) => w.replace(/^[.,]+|[.,]+$/g, "")).filter(Boolean);
+function parseIntent(text) {
+  const t = String(text || "").toLowerCase().replace(/\$/g, " usd ").replace(/₹/g, " inr ").trim();
+  const toks = words(t), has = (re) => re.test(t);
+  if (!toks.length || toks.length > 14) return null;                 // long sentences are normal chat, not card requests
+  if (has(/close.*card|card.*(close|band|hata)|कार्ड.*(बंद|हटा)|કાર્ડ.*બંધ/u)) return { type: "close" };
+  const cur = toks.map((w) => CUR[w]).filter(Boolean), n = t.match(/\d+(?:[.,]\d+)*/);
+  if (cur.length && (n || cur.length > 1)) {
+    const amount = n ? parseFloat(n[0].replace(/,(?=\d{3}\b)/g, "").replace(",", ".")) : 1;
+    const from = cur[0], to = cur[1] && cur[1] !== cur[0] ? cur[1] : from === "INR" ? "USD" : "INR";
+    return { type: "currency", args: { amount: isFinite(amount) ? amount : 1, from, to } };
+  }
+  const place = () => toks.filter((w) => !STOP.has(w) && !/^[\d.,]+$/.test(w)).slice(0, 3).join(" ").replace(/(^|\s)\p{L}/gu, (m) => m.toUpperCase());
+  if (has(/weather|mausam|मौसम|મોસમ|હવામાન/u)) return { type: "weather", args: { location: place() } };
+  if (has(/news|khabar|खबर|समाचार|સમાચાર|headline/u)) return { type: "news", args: {} };
+  if (has(/search|khoj|dhundh|खोज|ढूंढ|શોધ/u)) return { type: "search", args: { query: toks.filter((w) => w === "latest" || !STOP.has(w)).join(" ") } };
+  if (has(/\btime\b|samay|baje|टाइम|समय|બજ|સમય/u)) return { type: "clock", args: { location: place() } };
+  return null;
+}
+// </intent>
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const okUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
+const isNA = (v) => v == null || v === "" || (typeof v === "number" && !isFinite(v));
+const V = (v, f) => (isNA(v) ? '<i class="na">Data unavailable</i>' : esc(f ? f(v) : v));
+const kv = (l, v) => "<div><small>" + l + "</small><b>" + v + "</b></div>";
+const hm = (s) => (typeof s === "string" && s.length >= 16 ? s.slice(11, 16) : null);
+const when = (s) => { const d = new Date(s); return isNaN(d) ? null : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); };
+const fmt = (n, d) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d == null ? 2 : d });
+const localTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+function wmo(c) {
+  if (c === 0) return ["Clear sky", "☀"]; if (c === 1 || c === 2) return ["Partly cloudy", "⛅"]; if (c === 3) return ["Overcast", "☁"];
+  if (c === 45 || c === 48) return ["Fog", "≋"]; if (c >= 51 && c <= 57) return ["Drizzle", "☂"]; if (c >= 61 && c <= 67) return ["Rain", "☂"];
+  if (c >= 71 && c <= 77) return ["Snow", "❄"]; if (c >= 80 && c <= 82) return ["Rain showers", "☂"]; if (c === 85 || c === 86) return ["Snow showers", "❄"];
+  if (c >= 95) return ["Thunderstorm", "⚡"]; return [null, "☁"];
+}
+async function getJSON(url) {
+  const c = new AbortController(), id = setTimeout(() => c.abort(), 12000);
+  try { const r = await fetch(url, { signal: c.signal }); if (!r.ok) throw new Error("Service error (HTTP " + r.status + ")"); return await r.json(); }
+  catch (e) { throw new Error(e.name === "AbortError" ? "The request timed out." : navigator.onLine === false ? "You appear to be offline." : e.message || "Network error"); }
+  finally { clearTimeout(id); }
+}
+async function geocode(name) {
+  const j = await getJSON("https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&name=" + encodeURIComponent(name));
+  if (!j.results || !j.results[0]) throw new Error("Could not find a place called \u201c" + name + "\u201d.");
+  return j.results[0];
+}
+// AVA Backend V1 tool results -> the field names the card renderers below expect. REST responses and card.open
+// content share one shape. Fields the backend does not send stay empty and render as "Data unavailable".
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return ""; } };
+const head = (x) => String(x == null ? "" : x).split(",")[0].trim();
+const fromAva = {
+  weather: (c) => ({ location: head(c.location), temperature: c.temperature_c, condition: c.condition || wmo(c.weather_code)[0], icon: wmo(c.weather_code)[1], humidity: c.humidity_percent, windSpeed: c.wind_speed_kmh,
+    rainProbability: c.rain_probability_percent, sunrise: c.sunrise, sunset: c.sunset, updated: c.observed_at }),
+  currency: (c) => ({ amount: c.original_amount, from: c.source_currency, to: c.target_currency, result: c.converted_amount, rate: c.exchange_rate, date: c.rate_date }),
+  clock: (c) => ({ city: head(c.location), timezone: c.timezone }),
+  news: (c) => ({ items: (c.articles || []).map((a) => ({ title: a.headline, summary: a.description, source: a.source, publishedAt: a.published_at, url: a.url })) }),
+  search: (c) => ({ items: (c.results || []).map((r) => ({ title: r.title, url: r.url, description: r.snippet, host: hostOf(r.url) })) })
+};
+const AVA_CARD_TYPE = { weather: "weather", currency: "currency", time: "clock", news: "news", search: "search" }; // backend card_type -> card type here
+const loaders = {
+  async weather({ location }) {
+    const g = await geocode(location);
+    const j = await getJSON("https://api.open-meteo.com/v1/forecast?latitude=" + g.latitude + "&longitude=" + g.longitude + "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&daily=sunrise,sunset,precipitation_probability_max&timezone=auto&forecast_days=1");
+    const c = j.current || {}, d = j.daily || {}, w = wmo(c.weather_code);
+    return { location: g.name, temperature: c.temperature_2m, condition: w[0], icon: w[1], humidity: c.relative_humidity_2m, windSpeed: c.wind_speed_10m,
+      rainProbability: d.precipitation_probability_max && d.precipitation_probability_max[0], sunrise: d.sunrise && d.sunrise[0], sunset: d.sunset && d.sunset[0], updated: c.time };
+  },
+  async currency({ amount, from, to }) {
+    const j = await getJSON("https://api.frankfurter.app/latest?amount=" + encodeURIComponent(amount) + "&from=" + from + "&to=" + to);
+    const v = j.rates && j.rates[to];
+    if (v == null) throw new Error("No exchange rate available for " + from + " \u2192 " + to + ".");
+    return { amount, from, to, result: v, rate: v / amount, date: j.date };
+  },
+  async clock({ location }) {
+    if (!location) return { city: "Local", timezone: localTz() };
+    const g = await geocode(location);
+    if (!g.timezone) throw new Error("No time zone data for " + g.name + ".");
+    return { city: g.name, timezone: g.timezone };
+  },
+  news: async ({ query }) => fromAva.news(await ava.news(query || CFG.defaultNewsQuery || "latest news")),
+  search: async ({ query }) => fromAva.search(await ava.search(query))
+};
+const dash = '<i class="na">Data unavailable</i>';
+const render = {
+  weather: (d) => '<div class="w-main"><span class="w-ic">' + esc(d.icon || "") + '</span><div><div class="w-t">' + V(d.temperature, (v) => Math.round(v) + "\u00B0C") + '</div><div class="w-c">' + V(d.condition) + '</div></div></div><div class="kv">' +
+    kv("Humidity", V(d.humidity, (v) => v + "%")) + kv("Wind speed", V(d.windSpeed, (v) => Math.round(v) + " km/h")) + kv("Rain probability", V(d.rainProbability, (v) => v + "%")) +
+    kv("Sunrise", V(hm(d.sunrise))) + kv("Sunset", V(hm(d.sunset))) + kv("Last updated", V(hm(d.updated))) + "</div>",
+  currency: (d) => '<div class="cu-main">' + V(d.amount, fmt) + " " + esc(d.from || "") + ' = <span>' + V(d.result, fmt) + " " + esc(d.to || "") + '</span></div><div class="kv">' +
+    kv("Source", V(d.from)) + kv("Target", V(d.to)) + kv("Exchange rate", V(d.rate, (v) => "1 " + d.from + " = " + fmt(v, 4) + " " + d.to)) + kv("Rate date", V(d.date)) + "</div>",
+  clock: (d) => '<div class="ck-t" data-clock="' + esc(d.timezone || "") + '">--:--:--</div><div class="ck-d" data-date="' + esc(d.timezone || "") + '"></div><div class="kv">' + kv("City", V(d.city)) + kv("Time zone", V(d.timezone)) + "</div>",
+  news: (d) => {
+    const a = (d.items || []).filter((x) => x && x.title).slice(0, 3);
+    return a.length ? a.map((x, i) => '<div class="nw">' + (i === 0 && okUrl(x.image) ? '<img loading="lazy" referrerpolicy="no-referrer" alt="" src="' + esc(x.image) + '">' : "") + "<h4>" + esc(x.title) + "</h4>" +
+      (i === 0 && x.summary ? "<p>" + esc(x.summary) + "</p>" : "") + "<em>" + V(x.source) + " \u00B7 " + V(when(x.publishedAt)) + "</em>" +
+      (okUrl(x.url) ? '<a class="more" href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">READ MORE \u203A</a>' : "") + "</div>").join("") : dash;
+  },
+  search: (d) => {
+    const a = (d.items || []).filter((x) => x && x.title && okUrl(x.url)).slice(0, 4);
+    return a.length ? a.map((x) => '<div class="nw"><h4><a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.title) + "</a></h4>" + (x.description ? "<p>" + esc(x.description) + "</p>" : "") +
+      "<em>" + V(x.host) + (x.date ? " \u00B7 " + V(x.date) : "") + "</em></div>").join("") : dash;
+  }
+};
+const titleOf = (t, d) => (t === "weather" && d.location ? d.location.toUpperCase() + " WEATHER" : t === "clock" && d.city ? d.city.toUpperCase() + " TIME" : TITLES[t]);
+const SAY = {
+  weather: (d) => d.location + " mein abhi " + (isNA(d.temperature) ? "" : Math.round(d.temperature) + " degree Celsius, ") + (d.condition || "") + (isNA(d.humidity) ? "" : ". Humidity " + d.humidity + " percent") + (isNA(d.windSpeed) ? "." : " aur hawa " + Math.round(d.windSpeed) + " kilometre per hour."),
+  currency: (d) => fmt(d.amount) + " " + d.from + " ka " + fmt(d.result) + " " + d.to + " hota hai.",
+  clock: (d) => d.city + " mein abhi " + new Date().toLocaleTimeString("en-US", { timeZone: d.timezone, hour: "numeric", minute: "2-digit" }) + " hue hain.",
+  news: (d) => { const x = d.items && d.items[0]; return x ? "Aaj ki top khabar: " + x.title + (x.source ? ". Source: " + x.source : "") : "Abhi koi khabar nahi mili."; },
+  search: (d) => { const a = d.items || []; return a.length ? "Mujhe " + a.length + " results mile. Pehla: " + a[0].title : "Koi verified result nahi mila."; }
+};
+
+function createCards(onLayout) {
+  let root, card, tabEl, content, sndBtn, ro, cur = null, token = 0, tick = 0, closeT = 0, lastKey = "";
+  const inflight = new Map(), fmts = new Map();
+
+  // --- synthesized sound effects (Web Audio): fade in/out, no overlap, no rapid repeats, only after a user gesture ---
+  const sfx = (() => {
+    let ctx = null, on = true, lastAt = 0, live = null;
+    try { on = localStorage.getItem("jarvis.sfx") !== "off"; } catch (e) {}
+    return {
+      get on() { return on; },
+      set(v) { on = v; try { localStorage.setItem("jarvis.sfx", v ? "on" : "off"); } catch (e) {} },
+      unlock() { try { if (!ctx) { const AC = window.AudioContext || window.webkitAudioContext; if (AC) ctx = new AC(); } if (ctx && ctx.state === "suspended") ctx.resume(); } catch (e) {} },
+      play(kind) {
+        if (!on || !ctx || ctx.state !== "running") return;
+        const t0 = performance.now(); if (t0 - lastAt < 220) return; lastAt = t0;
+        const now = ctx.currentTime, open = kind === "open", dur = open ? 0.5 : 0.32;
+        if (live) { try { live.g.gain.cancelScheduledValues(now); live.g.gain.setTargetAtTime(0, now, 0.015); live.o.stop(now + 0.06); live.o2.stop(now + 0.06); } catch (e) {} }
+        const g = ctx.createGain(), f = ctx.createBiquadFilter(), o = ctx.createOscillator(), o2 = ctx.createOscillator();
+        f.type = "lowpass"; f.frequency.value = 3200; o.type = "triangle"; o2.type = "sine";
+        const a = open ? 280 : 900, b = open ? 1100 : 160;
+        o.frequency.setValueAtTime(a, now); o.frequency.exponentialRampToValueAtTime(b, now + dur);
+        o2.frequency.setValueAtTime(a * 2, now); o2.frequency.exponentialRampToValueAtTime(b * 2, now + dur);
+        g.gain.setValueAtTime(0.0001, now); g.gain.linearRampToValueAtTime(0.07, now + 0.06); g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+        o.connect(f); o2.connect(f); f.connect(g); g.connect(ctx.destination);
+        o.start(now); o2.start(now); o.stop(now + dur + 0.05); o2.stop(now + dur + 0.05);
+        const me = { g, o, o2 }; live = me;
+        o.onended = () => { if (live === me) live = null; try { g.disconnect(); f.disconnect(); } catch (e) {} };
+      },
+      destroy() { try { if (ctx) ctx.close(); } catch (e) {} ctx = null; }
+    };
+  })();
+
+  function build() {
+    if (root) return;
+    root = document.createElement("div"); root.id = "jc";
+    root.innerHTML = '<div class="jc" role="dialog" aria-live="polite" aria-label="Information card"><div class="jc-frame"><div class="jc-body"><div class="jc-tab"></div>' +
+      '<button type="button" class="jc-snd" aria-label="Toggle card sound">SFX</button><button type="button" class="jc-x" aria-label="Close card">\u00D7</button>' +
+      '<div class="jc-content"></div><i class="jc-scan"></i><i class="jc-hatch"></i></div></div></div>';
+    document.body.appendChild(root);
+    card = root.firstChild; tabEl = root.querySelector(".jc-tab"); content = root.querySelector(".jc-content"); sndBtn = root.querySelector(".jc-snd");
+    const paint = () => { sndBtn.classList.toggle("off", !sfx.on); sndBtn.setAttribute("aria-pressed", String(sfx.on)); };
+    paint();
+    root.querySelector(".jc-x").addEventListener("click", () => close());
+    sndBtn.addEventListener("click", () => { sfx.unlock(); sfx.set(!sfx.on); paint(); });
+    content.addEventListener("click", (e) => { if (e.target.closest("[data-retry]") && cur && cur.retry) cur.retry(); });
+    if (window.ResizeObserver) { ro = new ResizeObserver(layout); ro.observe(card); }
+    window.addEventListener("resize", layout);
+  }
+  function report(r, b) { const k = r + "|" + b; if (k === lastKey) return; lastKey = k; onLayout({ right: r, bottom: b }); }
+  // Desktop / landscape: card beside the avatar. Portrait: card below it. The camera is told how much room to leave.
+  function layout() {
+    if (!root) return;
+    const side = innerWidth >= 900 || (innerWidth > innerHeight && innerHeight <= 560);
+    root.classList.toggle("side", side);
+    if (!cur || card.classList.contains("out")) return report(0, 0);
+    const cs = getComputedStyle(root);
+    report(side ? Math.round(card.offsetWidth + parseFloat(cs.paddingRight) + 8) : 0, side ? 0 : Math.round(card.offsetHeight + parseFloat(cs.paddingBottom) + 6));
+  }
+  function runClock() {
+    content.querySelectorAll("[data-clock]").forEach((el) => {
+      const tz = el.getAttribute("data-clock"), d = content.querySelector("[data-date]");
+      try {
+        const f1 = fmts.get("t" + tz) || (fmts.set("t" + tz, new Intl.DateTimeFormat([], { timeZone: tz, hour: "2-digit", minute: "2-digit", second: "2-digit" })), fmts.get("t" + tz));
+        const f2 = fmts.get("d" + tz) || (fmts.set("d" + tz, new Intl.DateTimeFormat([], { timeZone: tz, weekday: "long", day: "numeric", month: "long", year: "numeric" })), fmts.get("d" + tz));
+        const n = new Date(); el.textContent = f1.format(n); if (d) d.textContent = f2.format(n);
+      } catch (e) { el.innerHTML = dash; }
+    });
+  }
+  function present(type) {
+    build(); clearTimeout(closeT); clearInterval(tick);
+    const wasOpen = root.classList.contains("on") && !card.classList.contains("out");
+    root.classList.add("on"); card.classList.remove("out", "in"); void card.offsetWidth; card.classList.add("in");
+    if (!wasOpen || !cur || cur.type !== type) sfx.play("open");
+    cur = { type, retry: null }; tabEl.textContent = TITLES[type]; content.innerHTML = '<div class="jc-load">ACQUIRING DATA\u2026</div>';
+    layout();
+  }
+  function fill(type, d) {
+    if (!cur || cur.type !== type) return;
+    cur.data = d; tabEl.textContent = titleOf(type, d); content.innerHTML = render[type](d);
+    if (type === "clock") { runClock(); tick = setInterval(runClock, 1000); }
+    layout();
+  }
+  function fail(type, e, retry) {
+    if (!cur || cur.type !== type) return;
+    cur.retry = retry; tabEl.textContent = TITLES[type] + " \u00B7 ERROR";
+    content.innerHTML = '<div class="jc-err"><b>' + esc((e && e.message) || "Something went wrong.") + '</b><button type="button" data-retry>RETRY</button></div>'; layout();
+  }
+  function close(type) {
+    if (!cur || (type && type !== cur.type)) return false;
+    token++; clearInterval(tick); sfx.play("close"); card.classList.add("out"); report(0, 0);
+    closeT = setTimeout(() => { root.classList.remove("on"); card.classList.remove("in", "out"); cur = null; }, 300);
+    return true;
+  }
+  // Opens the card immediately, then fills it. Identical in-flight requests share one fetch; stale replies are ignored.
+  function request(type, args) {
+    const mine = ++token; present(type);
+    const key = type + "|" + JSON.stringify(args || {});
+    let p = inflight.get(key);
+    if (!p) { p = loaders[type](args || {}); inflight.set(key, p); const clear = () => inflight.delete(key); p.then(clear, clear); }
+    return p.then((d) => { if (cur && token === mine) fill(type, d); return d; },
+      (e) => { if (cur && token === mine) fail(type, e, () => request(type, args)); throw e; });
+  }
+  // Protocol-agnostic entry point: call this from your voice backend's message handler.
+  function handleEvent(m) {
+    if (!m || typeof m !== "object") return;
+    if (m.type === "card.close") close(m.card);
+    else if (m.type === "card.request" && loaders[m.card]) request(m.card, m.args || {}).catch(() => {});
+    else if (m.type === "card.open" && render[m.card]) { token++; present(m.card); fill(m.card, m.data || {}); }
+  }
+  // Fallback for the current Web Speech flow: returns the sentence to speak, or null when the text is normal chat.
+  async function tryHandle(text) {
+    const it = parseIntent(text); if (!it) return null;
+    if (it.type === "close") return close() ? "Theek hai, card band kar diya." : "Abhi koi card khula nahi hai.";
+    if (it.type === "weather" && !it.args.location) return "Kaunse shehar ka weather jaanna hai?";
+    if (it.type === "search" && !it.args.query) return "Kya search karna hai?";
+    try { return SAY[it.type](await request(it.type, it.args)); }
+    catch (e) { return "Maaf kijiye, ye jaankari abhi nahi mil paayi. Card par retry ka option hai."; }
+  }
+  function destroy() {
+    clearInterval(tick); clearTimeout(closeT); if (ro) ro.disconnect();
+    window.removeEventListener("resize", layout); sfx.destroy(); if (root) root.remove(); root = null;
+  }
+  return { unlock: sfx.unlock, request, handleEvent, tryHandle, close, destroy };
+}
+const cards = createCards((rs) => { if (stage) { stage.reserve = rs; stage.resize(true); } });
+window.JarvisCards = cards;
+document.addEventListener("pointerdown", () => cards.unlock(), { once: true });
+
+// ===== AVA Backend V1 connection =====
+// Backend card events -> the existing card system. card.request carries no data (card.open follows with the data), and
+// the "custom" text card from open_card has no renderer in this UI, so both are ignored.
+function onAvaEvent(m) {
+  if (m.type === "card.open" && m.card) {
+    const t = AVA_CARD_TYPE[m.card.card_type];
+    if (t && m.card.content) cards.handleEvent({ type: "card.open", card: t, data: fromAva[t](m.card.content) });
+  } else if (m.type === "card.close") cards.handleEvent({ type: "card.close" });
+}
+const ava = createAvaClient({ config: window.AVA_CONFIG, onEvent: onAvaEvent, onNotice: (msg) => toast(msg, 6000) });
+
+async function init() {
+  hud.set(4);
+  showGate("Tap to start");
+  const container = document.getElementById("avatarContainer");
+  let failure = null;
+  try { stage = createStage(container); } catch (e) { failure = e; stage = null; }
+  if (stage) {
+    try {
+      vrm = await loadAvatar(stage, onModelProgress);
+      hud.set(94);
+      animator = new Animator(vrm, stage.camera);
+      hud.set(98);
+    } catch (e) {
+      failure = e; console.error(e);
+      if (vrm && !animator) { disposeAvatar(stage, vrm); vrm = null; }
+    }
+  }
+
+  // Voice and chat always start, even if the avatar could not be loaded.
+  voice = new Voice({
+    onTranscript: handleTranscript,
+    onSpeaking: (on) => document.body.classList.toggle("speaking", on),
+    onError: (code) => {
+      if (code === "mic-denied") showGate("Microphone blocked — allow it in browser settings, then tap");
+      else if (code === "recognition-network") toast("Speech recognition lost connection. Retrying…");
+    }
+  });
+  if (!supported.recognition) toast("This browser has no speech recognition. Use Chrome, Edge or Safari.", 9000);
+
+  if (window.ResizeObserver) { ro = new ResizeObserver(onResize); ro.observe(container); }
+  window.addEventListener("resize", onResize);
+  window.addEventListener("orientationchange", () => { onResize(); setTimeout(onResize, 300); });
+  document.addEventListener("fullscreenchange", () => setTimeout(onResize, 100));
+  document.addEventListener("webkitfullscreenchange", () => setTimeout(onResize, 100));
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", onResize);
+  document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("pagehide", cleanup);
+
+  if (vrm && animator) {
+    if (/[?&]debug/.test(location.search)) startDebug();
+    last = performance.now(); loop(last);
+  }
+  if (failure) { toast(failure.message, 12000); hud.fail(failure.message); }
+  else hud.success();
+  ava.health().then((h) => console.info("AVA backend health:", h.ok ? "ok (" + h.ms + " ms)" : "unreachable - " + h.error)); // also wakes a sleeping Render instance
+}
+
+let dbgTimer = 0;
+function startDebug() {
+  const pre = document.createElement("pre");
+  pre.style.cssText = "position:fixed;left:6px;top:calc(6px + env(safe-area-inset-top,0px));z-index:40;color:#7CFF9B;font:11px/1.35 monospace;background:rgba(0,0,0,.6);padding:6px;pointer-events:none;max-width:95vw;white-space:pre-wrap";
+  document.body.appendChild(pre);
+  const tick = () => {
+    const v = stage.view, m = stage.metrics, f = stage.camera.userData.framing; if (!v || !m || !f) return;
+    pre.textContent = "view " + v.w + "x" + v.h + " dpr " + (window.devicePixelRatio || 1) + " insets " + v.top + "/" + v.bottom +
+      "\nregion H " + m.regionH.toFixed(2) + " W " + m.regionW.toFixed(2) + " cY " + m.centerY.toFixed(2) +
+      "\ncam dist " + f.d.toFixed(2) + " y " + f.targetY.toFixed(2) +
+      "\nfigure " + Math.round(100 * f.regionPx / v.h) + "%H " + Math.round(100 * f.regionWpx / v.w) + "%W" +
+      "\nvrm v" + (vrm.meta && vrm.meta.metaVersion) + " front " + animator.front + " sL " + animator.sL + " sR " + animator.sR +
+      "\nexpr " + Object.keys(animator.has).join(",");
+  };
+  tick(); dbgTimer = setInterval(tick, 500);
+}
+
+function onResize() { cancelAnimationFrame(resizeRaf); resizeRaf = requestAnimationFrame(() => stage && stage.resize()); }
+
+function onVisibility() {
+  if (!voice) return;
+  if (document.hidden) { cancelAnimationFrame(raf); raf = 0; voice.halt(); }
+  else { if (vrm && animator && !raf) { last = performance.now(); loop(last); } voice.schedule(300); }
+}
+
+function loop(now) {
+  raf = requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  animator.update(dt, voice.viseme());
+  vrm.update(dt);
+  stage.renderer.render(stage.scene, stage.camera);
+}
+
+async function handleTranscript(text) {
+  if (busy) return;
+  busy = true; voice.pause(); setState("thinking");
+  let reply = null;
+  try { reply = await cards.tryHandle(text); } catch (e) { console.error("Card error:", e); }
+  if (reply == null) {
+    try { reply = await askAI(text); }
+    catch (e) { console.error("AI error:", e); reply = FALLBACK; }
+  }
+  setState("speaking");
+  await voice.speak(reply);
+  setState("listening"); busy = false; voice.resume();
+}
+
+// Mic permission and speech unlock must happen inside a user gesture.
+gate.addEventListener("click", async () => {
+  if (!voice) return;
+  voice.unlockSpeech(); cards.unlock();
+  try { await voice.enableMic(); }
+  catch (e) {
+    const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+    showGate(denied ? "Microphone blocked — allow it in browser settings, then tap" : "Microphone not available on this browser");
+    return;
+  }
+  gate.hidden = true; setState("listening"); voice.start(); ava.warmUp();
+});
+
+function cleanup() {
+  cancelAnimationFrame(raf); raf = 0;
+  if (voice) voice.stopAll();
+  cards.destroy(); ava.close();
+  if (animator) animator.dispose();
+  if (stage) { disposeAvatar(stage, vrm); stage.dispose(); }
+  clearInterval(dbgTimer);
+  if (ro) ro.disconnect();
+  window.removeEventListener("resize", onResize);
+}
+
+init();
+
+</script>
+</body>
+</html>
