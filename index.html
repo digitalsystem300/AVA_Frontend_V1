@@ -432,123 +432,434 @@ function disposeAvatar(stage, vrm) {
 }
 
 /* ===== voice ===== */
+// Real-time voice: microphone -> mono PCM16 16 kHz chunks -> AVA backend (Gemini Live) -> Gemini's own 24 kHz PCM speech -> speakers.
+// Lip-sync is driven by the played audio signal. Browser speech synthesis is not used; SpeechRecognition (where the browser has it)
+// is only a local "Hey AVA / AVA" keyword spotter - its text is never sent anywhere and never used as the command.
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-const supported = { recognition: !!SR, synthesis: "speechSynthesis" in window };
-const VOWELS = { a: "aa", e: "ee", i: "ih", o: "oh", u: "ou", y: "ih" };
-const LABIAL = "bmpfv";
-const CYCLE = ["aa", "oh", "ee", "ih"];
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+const supported = { audio: !!AudioCtx, mic: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia), wake: !!SR };
 
-class Voice {
-  constructor(cb) {
-    this.cb = cb; this.rate = 1; this.want = false; this.active = false; this.speaking = false;
-    this.paused = false; this.denied = false; this.timeline = []; this.idx = 0; this.backoff = 600; this.voice = null;
-    if (SR) {
-      const r = (this.rec = new SR());
-      r.lang = "hi-IN"; r.continuous = true; r.interimResults = false;
-      r.onstart = () => { this.active = true; this.backoff = 600; };
-      r.onend = () => { this.active = false; this.schedule(); };
-      r.onerror = (e) => {
-        if (e.error === "not-allowed" || e.error === "service-not-allowed") { this.denied = true; this.want = false; cb.onError("mic-denied"); }
-        else if (e.error === "network") { this.backoff = Math.min(this.backoff * 2, 8000); cb.onError("recognition-network"); }
-      };
-      r.onresult = (e) => {
-        if (this.speaking || this.paused) return;
-        const res = e.results[e.results.length - 1];
-        if (!res.isFinal) return;
-        const text = res[0].transcript.trim();
-        if (text) cb.onTranscript(text);
-      };
+const CHUNK = 640;       // 40 ms of 16 kHz audio per WebSocket message
+const RING_N = 50;       // 2 s kept while asleep / while AVA speaks: sent as pre-roll when the wake word or a barge-in fires
+const NO_SPEECH_MS = 9000; // after "Hey AVA" with no command: go back to sleep
+const BARGE_CHUNKS = 3;  // 120 ms of sustained user speech while AVA talks = barge-in
+
+// Box-filter resampler to 16 kHz PCM16. Its source text is also loaded into the AudioWorklet (so there is one implementation).
+class Resampler16k {
+  constructor(rate, size, emit) { this.ratio = rate / 16000; this.size = size; this.emit = emit; this.pos = 0; this.acc = 0; this.n = 0; this.out = new Int16Array(size); this.o = 0; this.sq = 0; }
+  push(ch) {
+    for (let i = 0; i < ch.length; i++) {
+      this.acc += ch[i]; this.n++; this.pos++;
+      if (this.pos >= this.ratio) {
+        this.pos -= this.ratio;
+        let s = this.acc / this.n; this.acc = 0; this.n = 0;
+        s = s > 1 ? 1 : s < -1 ? -1 : s;
+        this.out[this.o++] = s < 0 ? s * 32768 : s * 32767; this.sq += s * s;
+        if (this.o === this.size) { const pcm = this.out, rms = Math.sqrt(this.sq / this.size); this.out = new Int16Array(this.size); this.o = 0; this.sq = 0; this.emit(pcm, rms); }
+      }
     }
-    if (supported.synthesis) {
-      const load = () => { this.voice = pickVoice(); };
-      load(); speechSynthesis.addEventListener("voiceschanged", load);
-    }
-  }
-
-  // Explicit permission prompt; the stream is released at once so only one mic session (SpeechRecognition) stays open.
-  async enableMic() {
-    if (!SR || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("unsupported");
-    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-    s.getTracks().forEach((t) => t.stop());
-    this.denied = false;
-  }
-  unlockSpeech() { if (supported.synthesis) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } }
-
-  start() { this.want = true; this.schedule(0); }
-  pause() { this.paused = true; this.halt(); }
-  resume() { this.paused = false; this.schedule(700); }
-  halt() { clearTimeout(this.timer); if (this.rec && this.active) { try { this.rec.abort(); } catch (e) {} } }
-  schedule(ms = this.backoff) {
-    clearTimeout(this.timer);
-    if (!this.rec || !this.want || this.speaking || this.paused || this.denied) return;
-    this.timer = setTimeout(() => {
-      if (!this.active && this.want && !this.speaking && !this.paused) { try { this.rec.start(); } catch (e) {} }
-    }, ms);
-  }
-  stopAll() { this.want = false; this.halt(); if (supported.synthesis) speechSynthesis.cancel(); this.speaking = false; this.timeline = []; }
-
-  // Current viseme from the plan built from the spoken text; null = mouth closed.
-  viseme() {
-    if (!this.speaking) return null;
-    const now = performance.now(), tl = this.timeline;
-    while (this.idx < tl.length && tl[this.idx].e < now) this.idx++;
-    const c = tl[this.idx];
-    return c && c.s <= now && c.v ? c : null;
-  }
-
-  // Timeline from the text being spoken; re-synced on every word-boundary event the engine fires.
-  plan(text, from = 0) {
-    const ms = 62 / this.rate, tl = []; let t = performance.now();
-    for (let i = from; i < text.length; i++) {
-      const c = text[i].toLowerCase(); let v = null, w = 0, d = ms;
-      if (VOWELS[c]) { v = VOWELS[c]; w = 0.6 + ((i * 7) % 4) * 0.1; d = ms * 1.6; }
-      else if (/[,;:.!?।]/.test(c)) d = 230 / this.rate;
-      else if (c === " " || c === "\n") d = ms * 0.5;
-      else if (LABIAL.includes(c)) d = ms * 0.8;
-      else if (/[a-z]/.test(c)) { v = "ih"; w = 0.18; }
-      else { v = CYCLE[i % 4]; w = 0.5; d = ms * 1.4; } // non-Latin scripts (e.g. Devanagari)
-      tl.push({ s: t, e: t + d, v, w }); t += d;
-    }
-    this.timeline = tl; this.idx = 0;
-  }
-
-  speak(text) {
-    return new Promise((resolve) => {
-      if (!supported.synthesis) return resolve();
-      speechSynthesis.cancel(); this.halt();
-      this.speaking = true; this.cb.onSpeaking(true);
-      const chunks = text.match(/[^.!?।\n]+[.!?।]*/g) || [text];
-      let i = 0, finished = false;
-      const finish = () => {
-        if (finished) return; finished = true;
-        this.speaking = false; this.timeline = []; this.cb.onSpeaking(false); resolve();
-      };
-      const next = () => {
-        if (finished) return;
-        if (i >= chunks.length) return finish();
-        const chunk = chunks[i++].trim(); if (!chunk) return next();
-        const u = new SpeechSynthesisUtterance(chunk);
-        u.lang = "hi-IN"; u.rate = this.rate; u.pitch = 1.05;
-        if (this.voice) { u.voice = this.voice; u.lang = this.voice.lang; }
-        let done = false;
-        const go = () => { if (done) return; done = true; clearTimeout(wd); next(); };
-        const wd = setTimeout(go, chunk.length * 130 / this.rate + 4000); // watchdog for engines that never fire onend
-        u.onstart = () => this.plan(chunk);
-        u.onboundary = (e) => { if (typeof e.charIndex === "number") this.plan(chunk, e.charIndex); };
-        u.onend = go;
-        u.onerror = (e) => { if (e.error === "interrupted" || e.error === "canceled") { done = true; clearTimeout(wd); finish(); } else go(); };
-        speechSynthesis.speak(u);
-      };
-      next();
-    });
   }
 }
+const CAPTURE_WORKLET =
+  "const Resampler16k = " + Resampler16k.toString() + ";\n" +
+  "class AvaCapture extends AudioWorkletProcessor {\n" +
+  "  constructor() { super(); this.r = new Resampler16k(sampleRate, " + CHUNK + ", (pcm, rms) => this.port.postMessage({ pcm: pcm.buffer, rms }, [pcm.buffer])); }\n" +
+  "  process(inputs) { const ch = inputs[0] && inputs[0][0]; if (ch) this.r.push(ch); return true; }\n" +
+  "}\nregisterProcessor('ava-capture', AvaCapture);";
 
-function pickVoice() {
-  const vs = speechSynthesis.getVoices(); if (!vs.length) return null;
-  const female = /female|swara|heera|kalpana|lekha|neerja|zira|samantha|google (हिन्दी|hindi)/i;
-  const hi = vs.filter((v) => /^hi/i.test(v.lang)), inn = vs.filter((v) => /^en-IN/i.test(v.lang));
-  return hi.find((v) => female.test(v.name)) || hi[0] || inn.find((v) => female.test(v.name)) || inn[0] || null;
+function toB64(pcm) {
+  const u8 = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  let s = ""; for (let i = 0; i < u8.length; i += 0x2000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x2000));
+  return btoa(s);
+}
+
+// "Hey AVA" / "AVA" spotting on the recognizer's text. The name must open the utterance (optionally after a greeting), so
+// ordinary sentences that merely contain the sound ("I was telling Ava...", "Java", "lava") do not wake AVA.
+const WAKE_GREET = new Set(["hey", "hi", "hello", "hay", "ok", "okay", "arre", "are", "अरे", "हे", "हाय", "हेलो", "हैलो", "ओके"]);
+const WAKE_NAME = new Set(["ava", "aava", "awa", "अवा", "आवा", "एवा"]);
+const WAKE_NAME_AFTER_GREETING = new Set(["eva", "aba", "abba"]);
+function matchWake(text) {
+  const t = String(text).toLowerCase().normalize("NFC").replace(/[^\p{L}\p{M}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+  if (!t.length || t.length > 12) return false;
+  if (WAKE_NAME.has(t[0])) return true;
+  return WAKE_GREET.has(t[0]) && !!t[1] && (WAKE_NAME.has(t[1]) || WAKE_NAME_AFTER_GREETING.has(t[1]));
+}
+
+const isDenied = (e) => !!e && (e.name === "NotAllowedError" || e.name === "SecurityError" || e.name === "PermissionDeniedError");
+
+class Voice {
+  // cb: { sendAudio(b64), interrupt(), connected(), onState(state), onSpeaking(bool), onError(code, detail) }
+  constructor(cb) {
+    this.cb = cb; this.ctx = null; this.stream = null; this.src = null; this.node = null; this.sink = null; this.workletReady = false;
+    this.outGain = null; this.analyser = null; this.td = null; this.fd = null; this.env = 0;
+    this.want = false; this.hidden = false; this.mode = "off"; // off | dormant | awake | thinking | speaking
+    this.ring = []; this.floor = 0.01; this.lastChunk = 0; this.loudRun = 0; this.bargeRun = 0;
+    this.wokeAt = 0; this.lastSpeech = 0; this.heardSpeech = false; this.thinkSince = 0; this.gotAny = false;
+    this.sources = new Set(); this.nextT = 0; this.lastAudioAt = 0; this.dropStale = false; this.dropT = 0;
+    this.turn = this.newTurn();
+    this.wakeMode = SR && !/[?&]wake=open/.test(location.search) ? "spotter" : "open"; // open = no wake word, listen continuously
+    this.rec = null; this.recActive = false; this.recStart = 0; this.wakeTimer = 0; this.wakeFails = 0;
+    this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
+  }
+
+  newTurn() { return { done: false, open: 0, tools: false, audio: false }; }
+
+  /* ---------- lifecycle ---------- */
+
+  // Must be called from a user gesture (the existing "Tap to start" gate): unlocks audio output and asks for the microphone.
+  async start() {
+    if (!supported.audio || !supported.mic) throw new Error("unsupported");
+    this.want = true; this.hidden = false;
+    if (!this.ctx) this.buildAudio();
+    const resumed = this.ctx.resume(); // synchronous part of the gesture
+    this.unlockOutput();
+    try { await resumed; } catch (e) {}
+    if (!this.stream) await this.openMic();
+    if (this.ctx.state !== "running") throw new Error("suspended");
+    if (!this.dog) this.dog = setInterval(() => this.tick(), 1000);
+    if (this.mode === "off") this.enterIdle();
+  }
+
+  stopAll() {
+    this.want = false; clearInterval(this.dog); this.dog = 0; clearTimeout(this.wakeTimer); clearTimeout(this.dropT); clearTimeout(this.muteT);
+    this.stopWake(true); this.flushPlayback(); this.closeMic(); this.ring.length = 0;
+    this.mode = "off";
+    if (this.ctx) { const c = this.ctx; this.ctx = null; try { c.close(); } catch (e) {} }
+    this.cb.onSpeaking(false);
+  }
+
+  // Tab hidden: release the microphone and stop speaking (AVA only works while the app is open and visible).
+  suspend() {
+    if (!this.want || this.hidden) return;
+    this.hidden = true; this.flushPlayback(); this.stopWake(); this.ring.length = 0; this.closeMic();
+    this.turn = this.newTurn(); this.setMode("dormant");
+    if (this.ctx) { try { this.ctx.suspend(); } catch (e) {} }
+  }
+  async resume() {
+    if (!this.want || !this.hidden) return;
+    this.hidden = false;
+    try { await this.ctx.resume(); await this.openMic(); }
+    catch (e) { this.cb.onError(isDenied(e) ? "mic-denied" : "mic-lost"); return; }
+    this.enterIdle();
+  }
+
+  buildAudio() {
+    let ctx;
+    try { ctx = new AudioCtx({ latencyHint: "interactive" }); } catch (e) { ctx = new AudioCtx(); }
+    this.ctx = ctx;
+    this.outGain = ctx.createGain(); this.analyser = ctx.createAnalyser();
+    this.analyser.fftSize = 1024; this.analyser.smoothingTimeConstant = 0.3;
+    this.outGain.connect(this.analyser); this.analyser.connect(ctx.destination);
+    this.td = new Uint8Array(this.analyser.fftSize); this.fd = new Uint8Array(this.analyser.frequencyBinCount);
+  }
+  unlockOutput() { // silent one-sample buffer: unlocks playback on iOS without making any sound
+    try { const s = this.ctx.createBufferSource(); s.buffer = this.ctx.createBuffer(1, 1, 22050); s.connect(this.ctx.destination); s.start(0); } catch (e) {}
+  }
+
+  /* ---------- microphone ---------- */
+
+  async openMic() {
+    this.closeMic();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const ctx = this.ctx;
+    if (!ctx || !this.want) { stream.getTracks().forEach((t) => t.stop()); return; }
+    let node = null;
+    if (ctx.audioWorklet && typeof AudioWorkletNode === "function") {
+      try {
+        if (!this.workletReady) {
+          const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: "text/javascript" }));
+          try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+          this.workletReady = true;
+        }
+        node = new AudioWorkletNode(ctx, "ava-capture", { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+        node.port.onmessage = (e) => this.onChunk(new Int16Array(e.data.pcm), e.data.rms);
+      } catch (e) { console.warn("AudioWorklet unavailable, using ScriptProcessor:", e); node = null; }
+    }
+    if (!node) {
+      const rs = new Resampler16k(ctx.sampleRate, CHUNK, (pcm, rms) => this.onChunk(pcm, rms));
+      node = ctx.createScriptProcessor(2048, 1, 1);
+      node.onaudioprocess = (e) => rs.push(e.inputBuffer.getChannelData(0));
+    }
+    const src = ctx.createMediaStreamSource(stream), sink = ctx.createGain();
+    sink.gain.value = 0; // keeps the capture node running without playing the microphone back
+    src.connect(node); node.connect(sink); sink.connect(ctx.destination);
+    stream.getAudioTracks().forEach((t) => {
+      t.onended = () => this.micLost("ended");
+      t.onmute = () => { clearTimeout(this.muteT); this.muteT = setTimeout(() => { if (this.stream && this.stream.getAudioTracks().some((x) => x.muted)) this.micLost("muted"); }, 3000); };
+      t.onunmute = () => clearTimeout(this.muteT);
+    });
+    this.stream = stream; this.src = src; this.node = node; this.sink = sink; this.lastChunk = performance.now();
+  }
+
+  closeMic() {
+    clearTimeout(this.muteT);
+    const { stream, src, node, sink } = this;
+    this.stream = this.src = this.node = this.sink = null;
+    if (node) { try { node.port && (node.port.onmessage = null); node.onaudioprocess = null; node.disconnect(); } catch (e) {} }
+    if (src) { try { src.disconnect(); } catch (e) {} }
+    if (sink) { try { sink.disconnect(); } catch (e) {} }
+    if (stream) stream.getTracks().forEach((t) => { t.onended = t.onmute = t.onunmute = null; try { t.stop(); } catch (e) {} });
+  }
+
+  // The OS or browser took the microphone away (call, other app, permission change): reopen it, with back-off.
+  async micLost(reason) {
+    if (!this.want || this.hidden || this.recovering) return;
+    this.recovering = true;
+    console.warn("Microphone lost:", reason);
+    try {
+      for (let i = 0; i < 3 && this.want && !this.hidden; i++) {
+        try { await this.openMic(); if (this.stream) return; }
+        catch (e) { if (isDenied(e)) { this.cb.onError("mic-denied"); return; } }
+        await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+      }
+      if (this.want && !this.hidden && !this.stream) this.cb.onError("mic-lost");
+    } finally { this.recovering = false; }
+  }
+
+  // One-second housekeeping: audio-session recovery, stalled microphone, and the "nothing is happening" time-outs.
+  tick() {
+    if (!this.want || this.hidden || !this.ctx) return;
+    const now = performance.now();
+    if (this.ctx.state !== "running") {
+      try { const p = this.ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+      if (++this.suspendedFor === 3) this.cb.onError("audio-suspended");
+    } else {
+      this.suspendedFor = 0;
+      if (this.stream && now - this.lastChunk > 3000) { this.lastChunk = now; this.micLost("stalled"); }
+    }
+    if (this.mode === "awake" && this.wakeMode === "spotter" && !this.heardSpeech && now - this.wokeAt > NO_SPEECH_MS) this.enterIdle();
+    else if (this.mode === "thinking" && now - this.thinkSince > (this.gotAny ? 45000 : 12000)) {
+      if (this.gotAny) this.cb.onError("no-reply");
+      this.enterIdle();
+    } else if (this.mode === "speaking" && !this.sources.size && !this.turn.done && now - this.lastAudioAt > 6000) this.finishTurn();
+  }
+
+  /* ---------- state ---------- */
+
+  setMode(m) {
+    if (this.mode === m) return;
+    const prev = this.mode; this.mode = m;
+    document.body.dataset.avaMode = m;
+    if (prev === "speaking") this.cb.onSpeaking(false);
+    if (m === "speaking") this.cb.onSpeaking(true);
+    this.cb.onState(m === "thinking" ? "thinking" : m === "speaking" ? "speaking" : "listening");
+    if (m === "dormant") this.scheduleWake(prev === "speaking" ? 600 : 250); else this.stopWake();
+  }
+  enterIdle() { if (this.wakeMode === "open") this.beginAwake(0, false); else this.sleep(); }
+  sleep() { this.ring.length = 0; this.turn = this.newTurn(); this.setMode("dormant"); if (this.mode === "dormant") this.scheduleWake(250); }
+  beginAwake(preMs, heard) {
+    const now = performance.now();
+    this.wokeAt = this.lastSpeech = now; this.heardSpeech = !!heard; this.gotAny = false; this.loudRun = 0; this.turn = this.newTurn();
+    this.setMode("awake");
+    if (preMs) this.sendRing(preMs);
+  }
+  wake() {
+    if (!this.want || this.hidden || this.mode !== "dormant") return;
+    if (!this.cb.connected()) { this.soft("AVA is still connecting - try again in a moment."); return; }
+    this.beginAwake(2000, false);
+  }
+  soft(msg) { const n = performance.now(); if (n - this.softAt > 4000) { this.softAt = n; this.cb.onError("notice", msg); } }
+
+  /* ---------- wake-word spotter (local keyword spotting only) ---------- */
+
+  scheduleWake(ms) {
+    clearTimeout(this.wakeTimer);
+    if (this.wakeMode !== "spotter") return;
+    this.wakeTimer = setTimeout(() => this.startWake(), ms);
+  }
+  startWake() {
+    if (this.wakeMode !== "spotter" || !this.want || this.hidden || this.mode !== "dormant" || this.recActive) return;
+    if (!this.rec) {
+      const r = (this.rec = new SR());
+      r.lang = "en-IN"; r.continuous = true; r.interimResults = true; r.maxAlternatives = 3;
+      r.onstart = () => { this.recActive = true; this.recStart = performance.now(); };
+      r.onend = () => { this.recActive = false; this.scheduleWake(performance.now() - this.recStart < 1500 ? 1500 : 250); };
+      r.onerror = (e) => {
+        if (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture" || e.error === "network") {
+          if (++this.wakeFails >= 3) this.wakeUnavailable();
+        }
+      };
+      r.onresult = (e) => {
+        if (this.mode !== "dormant") return;
+        this.wakeFails = 0;
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          for (let a = 0; a < e.results[i].length; a++) if (matchWake(e.results[i][a].transcript)) { this.wake(); return; }
+        }
+      };
+    }
+    try { this.rec.start(); } catch (e) { /* already running: onend reschedules */ }
+  }
+  stopWake(destroy) {
+    clearTimeout(this.wakeTimer);
+    const r = this.rec;
+    if (r && this.recActive) { try { r.abort(); } catch (e) {} }
+    if (destroy && r) { r.onstart = r.onend = r.onerror = r.onresult = null; this.rec = null; this.recActive = false; }
+  }
+  // The recognizer cannot run here (blocked, offline, or it fights the microphone): fall back to listening continuously.
+  wakeUnavailable() {
+    if (this.wakeMode === "open") return;
+    this.wakeMode = "open"; this.stopWake(true);
+    this.cb.onError("wake-unavailable");
+    if (this.mode === "dormant") this.beginAwake(0, false);
+  }
+
+  /* ---------- microphone chunks -> backend ---------- */
+
+  send(pcm) { this.cb.sendAudio(toB64(pcm)); }
+  sendRing(ms) {
+    const keep = this.ring.splice(0).slice(-Math.ceil(ms / 40));
+    for (let i = 0; i < keep.length; i += 8) { // a few larger messages instead of a burst of 40 ms ones
+      const part = keep.slice(i, i + 8), merged = new Int16Array(part.length * CHUNK);
+      part.forEach((c, k) => merged.set(c.pcm, k * CHUNK));
+      this.send(merged);
+    }
+  }
+
+  onChunk(pcm, rms) {
+    const now = performance.now(); this.lastChunk = now;
+    const m = this.mode;
+    if (m === "dormant" || m === "awake" || m === "thinking") this.floor += (rms - this.floor) * (rms < this.floor * 2 + 0.004 ? 0.05 : 0.002);
+    this.floor = Math.min(Math.max(this.floor, 0.002), 0.04);
+
+    if (m === "dormant" || m === "speaking") { this.ring.push({ pcm, rms }); if (this.ring.length > RING_N) this.ring.shift(); }
+
+    if (m === "speaking") {
+      // Barge-in: the microphone is NOT streamed while AVA talks (so its own voice is never taken as a command); only
+      // sustained speech clearly louder than the room, and than what the speaker could leak back in, interrupts it.
+      const thr = Math.max(0.035, this.floor * 5, this.outLevel() * 0.6);
+      this.bargeRun = rms > thr ? this.bargeRun + 1 : 0;
+      if (this.bargeRun >= BARGE_CHUNKS) this.bargeIn();
+      return;
+    }
+    if (m === "awake" || m === "thinking") {
+      this.send(pcm);
+      if (rms > Math.max(0.015, this.floor * 3.5)) {
+        if (++this.loudRun >= 2 && now - this.wokeAt > 400) { this.lastSpeech = now; this.heardSpeech = true; if (m === "thinking") this.setMode("awake"); }
+      } else this.loudRun = 0;
+      if (this.mode === "awake" && this.heardSpeech && now - this.lastSpeech > 700) { this.thinkSince = now; this.setMode("thinking"); }
+    }
+  }
+
+  /* ---------- barge-in ---------- */
+
+  bargeIn() {
+    if (this.mode !== "speaking") return;
+    const generating = !this.turn.done;
+    this.flushPlayback();
+    // Audio of the interrupted answer that is still in flight must not be played: drop it until the model confirms the interruption.
+    this.dropStale = generating; clearTimeout(this.dropT);
+    if (generating) this.dropT = setTimeout(() => { this.dropStale = false; }, 2000);
+    this.cb.interrupt();
+    this.beginAwake(600, true);
+  }
+
+  /* ---------- backend events (from ava-client) ---------- */
+
+  onEvent(m) {
+    if (!this.want) return;
+    switch (m.type) {
+      case "audio.output":
+        if (this.dropStale || this.mode === "dormant" || this.mode === "off" || !m.data) return;
+        this.gotAny = true; this.turn.audio = true; this.playChunk(m.data, m.mime_type);
+        break;
+      case "transcript.input":
+        this.gotAny = true; this.dropStale = false;
+        if (this.mode === "awake") { this.thinkSince = performance.now(); this.setMode("thinking"); }
+        break;
+      case "interrupted":
+        this.flushPlayback();
+        if (m.source !== "client") this.dropStale = false;
+        if (this.mode === "speaking") this.beginAwake(0, true);
+        break;
+      case "tool.start":
+        this.turn.open++; this.turn.tools = true; this.gotAny = true;
+        if (this.mode === "awake") { this.thinkSince = performance.now(); this.setMode("thinking"); }
+        break;
+      case "tool.result": case "tool.error":
+        this.turn.open = Math.max(0, this.turn.open - 1);
+        break;
+      case "turn.complete":
+        if (this.mode === "dormant" || this.mode === "off") return;
+        if (this.turn.open > 0 || (this.turn.tools && !this.turn.audio)) return; // the model is still using a tool / about to answer
+        if (!this.turn.audio && !this.turn.tools) return; // e.g. the tail of an interrupted turn: nothing of this turn was heard
+        this.turn.done = true;
+        if (!this.sources.size) this.finishTurn();
+        break;
+      case "error":
+        this.cb.onError("gemini", (m.error && m.error.message) || "AVA backend error");
+        if (this.mode !== "dormant") this.finishTurn();
+        break;
+      case "status":
+        if (m.state === "session.closed") this.connectionLost();
+        else if (m.state === "session.reconnecting") this.cb.onError("notice", "Reconnecting to Gemini…");
+        break;
+    }
+  }
+
+  // Socket / Gemini session dropped: stop speaking and go back to waiting; the client reconnects by itself.
+  connectionLost() {
+    if (!this.want || this.mode === "off") return;
+    this.flushPlayback();
+    if (this.mode !== "dormant" && this.wakeMode === "spotter") this.sleep();
+  }
+
+  finishTurn() {
+    this.flushPlayback();
+    this.turn = this.newTurn();
+    this.enterIdle();
+  }
+
+  /* ---------- playback of Gemini's audio ---------- */
+
+  playChunk(b64, mime) {
+    const ctx = this.ctx; if (!ctx) return;
+    try {
+      const mm = /rate=(\d+)/.exec(mime || ""), rate = mm ? +mm[1] : 24000;
+      const bin = atob(b64), n = bin.length >> 1; if (!n) return;
+      const buf = ctx.createBuffer(1, n, rate), ch = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v & 0x8000) v -= 0x10000; ch[i] = v / 32768; }
+      const src = ctx.createBufferSource(); src.buffer = buf; src.connect(this.outGain);
+      const now = ctx.currentTime;
+      if (this.nextT < now + 0.02) this.nextT = now + (this.sources.size ? 0.02 : 0.06); // small cushion at the start of an utterance
+      src.start(this.nextT); this.nextT += buf.duration; this.lastAudioAt = performance.now();
+      this.sources.add(src);
+      src.onended = () => { this.sources.delete(src); try { src.disconnect(); } catch (e) {} if (!this.sources.size && this.turn.done && this.mode === "speaking") this.finishTurn(); };
+      if (this.mode !== "speaking") { this.bargeRun = 0; this.setMode("speaking"); }
+    } catch (e) { console.error("Playback failed:", e); this.cb.onError("playback"); }
+  }
+
+  // Immediately silence AVA and drop everything that is queued.
+  flushPlayback() {
+    for (const s of this.sources) { s.onended = null; try { s.stop(); } catch (e) {} try { s.disconnect(); } catch (e) {} }
+    this.sources.clear(); this.nextT = 0; this.env = 0;
+  }
+
+  isPlaying() { return !!this.ctx && this.sources.size > 0 && this.nextT > this.ctx.currentTime; }
+
+  outLevel() {
+    if (!this.analyser || !this.isPlaying()) return 0;
+    this.analyser.getByteTimeDomainData(this.td);
+    let sq = 0; for (let i = 0; i < this.td.length; i++) { const v = (this.td[i] - 128) / 128; sq += v * v; }
+    return Math.sqrt(sq / this.td.length);
+  }
+
+  /* ---------- lip-sync (called every frame by the animation loop) ---------- */
+  // Mouth opening follows the amplitude of the audio that is actually being played (AnalyserNode on the output). The viseme
+  // shape is a coarse guess from the spectral centroid - Gemini sends no phoneme data, so this is not phoneme-accurate.
+  // Returns null (mouth closed) when nothing is playing and during pauses in the speech.
+  viseme() {
+    if (this.mode !== "speaking" || !this.isPlaying()) { this.env = 0; return null; }
+    const rms = this.outLevel();
+    this.env += (rms - this.env) * (rms > this.env ? 0.7 : 0.55); // fast attack and release: the mouth follows pauses
+    const open = Math.min(Math.max((this.env - 0.008) / 0.09, 0), 1);
+    if (open < 0.06) return null;
+    this.analyser.getByteFrequencyData(this.fd);
+    const hz = this.ctx.sampleRate / this.analyser.fftSize, top = Math.min(this.fd.length, Math.floor(5000 / hz));
+    let sw = 0, s = 0; for (let i = 2; i < top; i++) { const a = this.fd[i] / 255; sw += a * i * hz; s += a; }
+    const c = s > 0 ? sw / s : 800;
+    const v = c < 450 ? "ou" : c < 800 ? "oh" : c < 1400 ? "aa" : c < 2300 ? "ee" : "ih";
+    return { v, w: Math.pow(open, 0.8) };
+  }
 }
 
 /* ===== animation ===== */
@@ -662,8 +973,7 @@ let toastTimer;
 function toast(msg, ms = 4500) { toastEl.textContent = msg; toastEl.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove("show"), ms); }
 function showGate(msg) { gateText.textContent = msg; gate.hidden = false; }
 
-let stage, vrm, animator, voice, raf = 0, last = 0, busy = false, resizeRaf = 0, ro = null;
-const FALLBACK = "Sorry, connection mein problem aa rahi hai.";
+let stage, vrm, animator, voice, raf = 0, last = 0, resizeRaf = 0, ro = null;
 
 // ===== HUD loading screen controller =====
 const hud = (() => {
@@ -965,7 +1275,22 @@ function onAvaEvent(m) {
     if (t && m.card.content) cards.handleEvent({ type: "card.open", card: t, data: fromAva[t](m.card.content) });
   } else if (m.type === "card.close") cards.handleEvent({ type: "card.close" });
 }
-const ava = createAvaClient({ config: window.AVA_CONFIG, onEvent: onAvaEvent, onNotice: (msg) => toast(msg, 6000) });
+// Backend connection status -> toasts (existing toast element) and a data attribute; no new UI.
+let connTimer = 0, lastConn = "";
+function onAvaConnection({ state, detail }) {
+  document.body.dataset.avaConn = state;
+  clearTimeout(connTimer);
+  if (state === lastConn) return;
+  const was = lastConn; lastConn = state;
+  if (state === "connecting") connTimer = setTimeout(() => toast("AVA backend is waking up - this can take up to a minute…", 9000), 6000);
+  else if (state === "reconnecting") { toast("Connection lost - reconnecting to AVA…", 4000); if (voice) voice.connectionLost(); }
+  else if (state === "ready") { if (was === "reconnecting") toast("AVA is connected again.", 2500); }
+  else if (state === "error") { if (voice) voice.connectionLost(); toast("AVA: " + detail, 9000); showGate("AVA backend unavailable — tap to retry"); }
+}
+const ava = createAvaClient({
+  config: window.AVA_CONFIG, onEvent: onAvaEvent, onNotice: (msg) => toast(msg, 6000),
+  onVoice: (m) => { if (voice) voice.onEvent(m); }, onConnection: onAvaConnection
+});
 
 async function init() {
   hud.set(4);
@@ -987,14 +1312,22 @@ async function init() {
 
   // Voice and chat always start, even if the avatar could not be loaded.
   voice = new Voice({
-    onTranscript: handleTranscript,
+    sendAudio: (b64) => ava.voice.sendAudio(b64),
+    interrupt: () => ava.voice.interrupt(),
+    connected: () => ava.voice.connected,
+    onState: setState,
     onSpeaking: (on) => document.body.classList.toggle("speaking", on),
-    onError: (code) => {
+    onError: (code, detail) => {
       if (code === "mic-denied") showGate("Microphone blocked — allow it in browser settings, then tap");
-      else if (code === "recognition-network") toast("Speech recognition lost connection. Retrying…");
+      else if (code === "mic-lost") showGate("Microphone lost — tap to continue");
+      else if (code === "audio-suspended") showGate("Audio paused — tap to continue");
+      else if (code === "wake-unavailable") toast("Wake word is not available here - AVA is listening continuously.", 9000);
+      else if (code === "gemini") toast("Gemini: " + detail, 7000);
+      else if (code === "no-reply") toast("AVA did not answer - say Hey AVA to try again.", 5000);
+      else if (code === "playback") toast("Audio playback problem.", 4000);
+      else if (code === "notice") toast(detail, 4000);
     }
   });
-  if (!supported.recognition) toast("This browser has no speech recognition. Use Chrome, Edge or Safari.", 9000);
 
   if (window.ResizeObserver) { ro = new ResizeObserver(onResize); ro.observe(container); }
   window.addEventListener("resize", onResize);
@@ -1004,6 +1337,7 @@ async function init() {
   if (window.visualViewport) window.visualViewport.addEventListener("resize", onResize);
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("pagehide", cleanup);
+  window.addEventListener("online", onOnline);
 
   if (vrm && animator) {
     if (/[?&]debug/.test(location.search)) startDebug();
@@ -1035,9 +1369,10 @@ function onResize() { cancelAnimationFrame(resizeRaf); resizeRaf = requestAnimat
 
 function onVisibility() {
   if (!voice) return;
-  if (document.hidden) { cancelAnimationFrame(raf); raf = 0; voice.halt(); }
-  else { if (vrm && animator && !raf) { last = performance.now(); loop(last); } voice.schedule(300); }
+  if (document.hidden) { cancelAnimationFrame(raf); raf = 0; voice.suspend(); }
+  else { if (vrm && animator && !raf) { last = performance.now(); loop(last); } voice.resume(); ava.voice.nudge(); }
 }
+function onOnline() { ava.voice.nudge(); }
 
 function loop(now) {
   raf = requestAnimationFrame(loop);
@@ -1047,31 +1382,18 @@ function loop(now) {
   stage.renderer.render(stage.scene, stage.camera);
 }
 
-async function handleTranscript(text) {
-  if (busy) return;
-  busy = true; voice.pause(); setState("thinking");
-  let reply = null;
-  try { reply = await cards.tryHandle(text); } catch (e) { console.error("Card error:", e); }
-  if (reply == null) {
-    try { reply = await askAI(text); }
-    catch (e) { console.error("AI error:", e); reply = FALLBACK; }
-  }
-  setState("speaking");
-  await voice.speak(reply);
-  setState("listening"); busy = false; voice.resume();
-}
-
-// Mic permission and speech unlock must happen inside a user gesture.
+// Microphone permission and audio unlock must happen inside a user gesture: the existing "Tap to start" gate is that gesture.
+// It is also shown again if the microphone or the audio session has to be re-enabled by the user.
 gate.addEventListener("click", async () => {
   if (!voice) return;
-  voice.unlockSpeech(); cards.unlock();
-  try { await voice.enableMic(); }
+  cards.unlock();
+  try { await voice.start(); }
   catch (e) {
-    const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
-    showGate(denied ? "Microphone blocked — allow it in browser settings, then tap" : "Microphone not available on this browser");
+    showGate(isDenied(e) ? "Microphone blocked — allow it in browser settings, then tap"
+      : e && e.message === "suspended" ? "Audio is blocked — tap to try again" : "Microphone not available on this browser");
     return;
   }
-  gate.hidden = true; setState("listening"); voice.start(); ava.warmUp();
+  gate.hidden = true; setState("listening"); ava.voice.start();
 });
 
 function cleanup() {
@@ -1083,6 +1405,7 @@ function cleanup() {
   clearInterval(dbgTimer);
   if (ro) ro.disconnect();
   window.removeEventListener("resize", onResize);
+  window.removeEventListener("online", onOnline);
 }
 
 init();
