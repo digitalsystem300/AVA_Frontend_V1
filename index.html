@@ -500,7 +500,7 @@ class Voice {
     this.wakeMode = SR && !/[?&]wake=open/.test(location.search) ? "spotter" : "open"; // open = no wake word, listen continuously
     this.rec = null; this.recActive = false; this.recStart = 0; this.wakeTimer = 0; this.wakeFails = 0;
     this.exclusive = this.wakeMode === "spotter" && !/[?&]wake=shared/.test(location.search); this.waking = false; this.lastRecErr = "";
-    this.unlockFn = null; this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
+    this.unlockFn = null; this.dbgSent = 0; this.dbgRx = 0; this.dbgLast = "-"; this.dbgHeard = "-"; this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
   }
 
   newTurn() { return { done: false, open: 0, tools: false, audio: false }; }
@@ -747,7 +747,13 @@ class Voice {
 
   /* ---------- microphone chunks -> backend ---------- */
 
-  send(pcm) { this.cb.sendAudio(toB64(pcm)); }
+  send(pcm) { this.dbgSent++; this.cb.sendAudio(toB64(pcm)); }
+  // One line for the ?debug overlay (shown only with ?debug in the address).
+  dbg() {
+    return "conn " + (document.body.dataset.avaConn || "-") + " | mode " + this.mode + " | wake " + this.wakeMode + (this.exclusive ? "/excl" : "") +
+      " rec " + (this.recActive ? "on" : "off") + " | ctx " + (this.ctx ? this.ctx.state : "-") + " | mic " + (this.stream ? "on" : "off") +
+      "\nsent " + this.dbgSent + " | rx audio " + this.dbgRx + " | last " + this.dbgLast + "\nheard: " + this.dbgHeard;
+  }
   sendRing(ms) {
     const keep = this.ring.splice(0).slice(-Math.ceil(ms / 40));
     for (let i = 0; i < keep.length; i += 8) { // a few larger messages instead of a burst of 40 ms ones
@@ -799,6 +805,9 @@ class Voice {
 
   onEvent(m) {
     if (!this.want) return;
+    if (m.type === "audio.output") this.dbgRx++;
+    else if (m.type === "transcript.input") { this.dbgLast = m.type; this.dbgHeard = String(m.text || "").slice(0, 60); }
+    else this.dbgLast = m.type + (m.type === "error" ? ": " + ((m.error && m.error.message) || "") : m.type === "status" ? ": " + m.state : "");
     switch (m.type) {
       case "audio.output":
         if (this.dropStale || this.mode === "dormant" || this.mode === "off" || !m.data) return;
@@ -1403,7 +1412,7 @@ function startDebug() {
       "\ncam dist " + f.d.toFixed(2) + " y " + f.targetY.toFixed(2) +
       "\nfigure " + Math.round(100 * f.regionPx / v.h) + "%H " + Math.round(100 * f.regionWpx / v.w) + "%W" +
       "\nvrm v" + (vrm.meta && vrm.meta.metaVersion) + " front " + animator.front + " sL " + animator.sL + " sR " + animator.sR +
-      "\nexpr " + Object.keys(animator.has).join(",");
+      "\nexpr " + Object.keys(animator.has).join(",") + "\n" + (voice ? voice.dbg() : "");
   };
   tick(); dbgTimer = setInterval(tick, 500);
 }
