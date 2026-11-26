@@ -499,8 +499,8 @@ class Voice {
     this.turn = this.newTurn();
     this.wakeMode = SR && !/[?&]wake=open/.test(location.search) ? "spotter" : "open"; // open = no wake word, listen continuously
     this.rec = null; this.recActive = false; this.recStart = 0; this.wakeTimer = 0; this.wakeFails = 0;
-    this.exclusive = false; this.waking = false; this.lastRecErr = "";
-    this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
+    this.exclusive = this.wakeMode === "spotter" && !/[?&]wake=shared/.test(location.search); this.waking = false; this.lastRecErr = "";
+    this.unlockFn = null; this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
   }
 
   newTurn() { return { done: false, open: 0, tools: false, audio: false }; }
@@ -508,17 +508,20 @@ class Voice {
   /* ---------- lifecycle ---------- */
 
   // Must be called from a user gesture (the existing "Tap to start" gate): unlocks audio output and asks for the microphone.
-  async start() {
+  async start(probe) {
     if (!supported.audio || !supported.mic) throw new Error("unsupported");
     this.want = true; this.hidden = false;
     if (!this.ctx) this.buildAudio();
-    const resumed = this.ctx.resume(); // synchronous part of the gesture
+    const resumed = this.ctx.resume(); // starts at once when the browser allows it (user already interacted / installed app)
     this.unlockOutput();
-    try { await resumed; } catch (e) {}
+    // Without a gesture the browser may keep the AudioContext suspended: that promise stays pending, so do not wait for it.
+    try { await Promise.race([resumed, new Promise((r) => setTimeout(r, 300))]); } catch (e) {}
     if (!this.stream && !this.exclusive) await this.openMic();
-    if (this.ctx.state !== "running") throw new Error("suspended");
+    else if (probe) { const t = await navigator.mediaDevices.getUserMedia({ audio: true }); t.getTracks().forEach((x) => x.stop()); } // re-ask for permission after a refusal
+    if (this.ctx.state !== "running") this.armUnlock();
     if (!this.dog) this.dog = setInterval(() => this.tick(), 1000);
     if (this.mode === "off") this.enterIdle();
+    else if (this.mode === "dormant") this.scheduleWake(0);
   }
 
   stopAll() {
@@ -542,6 +545,22 @@ class Voice {
     try { await this.ctx.resume(); if (!this.exclusive) await this.openMic(); }
     catch (e) { this.cb.onError(isDenied(e) ? "mic-denied" : "mic-lost"); return; }
     this.enterIdle();
+  }
+
+  // Autoplay policy: the first touch / key press anywhere on the page unlocks audio (silently; there is no start button).
+  armUnlock() {
+    if (this.unlockFn || !this.ctx) return;
+    const evs = ["pointerdown", "touchend", "click", "keydown"], ctx = this.ctx;
+    const done = () => { evs.forEach((e) => document.removeEventListener(e, fn, true)); this.unlockFn = null; };
+    const fn = () => {
+      if (ctx !== this.ctx) return done();
+      this.unlockOutput();
+      const p = ctx.resume(); if (p && p.then) p.then(() => { if (ctx.state === "running") done(); }, () => {});
+    };
+    this.unlockFn = fn;
+    ctx.onstatechange = () => { if (ctx.state === "running") done(); };
+    evs.forEach((e) => document.addEventListener(e, fn, true));
+    setTimeout(() => { if (this.ctx === ctx && ctx.state !== "running") this.cb.onError("audio-locked"); }, 1500);
   }
 
   buildAudio() {
@@ -623,7 +642,7 @@ class Voice {
     const now = performance.now();
     if (this.ctx.state !== "running") {
       try { const p = this.ctx.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
-      if (++this.suspendedFor === 3) this.cb.onError("audio-suspended");
+      if (++this.suspendedFor === 3) { this.armUnlock(); this.cb.onError("audio-locked"); }
     } else {
       this.suspendedFor = 0;
       if (this.stream && now - this.lastChunk > 3000) { this.lastChunk = now; this.micLost("stalled"); }
@@ -689,6 +708,7 @@ class Voice {
       r.onerror = (e) => {
         if (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture" || e.error === "network") {
           this.lastRecErr = e.error;
+          if (e.error === "not-allowed") { this.stopWake(true); this.cb.onError("mic-denied"); return; }
           if (++this.wakeFails >= 3) { if (!this.exclusive && this.stream) this.goExclusive(); else this.wakeUnavailable(); }
         }
       };
@@ -1316,7 +1336,7 @@ const ava = createAvaClient({
 
 async function init() {
   hud.set(4);
-  showGate("Tap to start");
+  gate.hidden = true; // no start button: AVA starts by itself (the gate is only shown again to recover from an error)
   const container = document.getElementById("avatarContainer");
   let failure = null;
   try { stage = createStage(container); } catch (e) { failure = e; stage = null; }
@@ -1342,7 +1362,7 @@ async function init() {
     onError: (code, detail) => {
       if (code === "mic-denied") showGate("Microphone blocked — allow it in browser settings, then tap");
       else if (code === "mic-lost") showGate("Microphone lost — tap to continue");
-      else if (code === "audio-suspended") showGate("Audio paused — tap to continue");
+      else if (code === "audio-locked") toast("Touch the screen once to turn on AVA's voice.", 7000);
       else if (code === "wake-unavailable") toast("Wake word is not available here" + (detail ? " (" + detail + ")" : "") + " - AVA is listening continuously.", 9000);
       else if (code === "gemini") toast("Gemini: " + detail, 7000);
       else if (code === "no-reply") toast("AVA did not answer - say Hey AVA to try again.", 5000);
@@ -1367,6 +1387,7 @@ async function init() {
   }
   if (failure) { toast(failure.message, 12000); hud.fail(failure.message); }
   else hud.success();
+  autoStart();
   ava.health().then((h) => console.info("AVA backend health:", h.ok ? "ok (" + h.ms + " ms)" : "unreachable - " + h.error)); // also wakes a sleeping Render instance
 }
 
@@ -1404,19 +1425,18 @@ function loop(now) {
   stage.renderer.render(stage.scene, stage.camera);
 }
 
-// Microphone permission and audio unlock must happen inside a user gesture: the existing "Tap to start" gate is that gesture.
-// It is also shown again if the microphone or the audio session has to be re-enabled by the user.
-gate.addEventListener("click", async () => {
+// AVA starts on its own when the page opens: wake-word listening, then the microphone turns on when "Hey AVA" is heard.
+// The gate (the old "Tap to start" button) now only appears to recover from an error (microphone blocked, backend unreachable).
+async function autoStart(probe) {
   if (!voice) return;
-  cards.unlock();
-  try { await voice.start(); }
+  try { await voice.start(probe); }
   catch (e) {
-    showGate(isDenied(e) ? "Microphone blocked — allow it in browser settings, then tap"
-      : e && e.message === "suspended" ? "Audio is blocked — tap to try again" : "Microphone not available on this browser");
+    showGate(isDenied(e) ? "Microphone blocked — allow it in browser settings, then tap" : "Microphone not available on this browser");
     return;
   }
   gate.hidden = true; setState("listening"); ava.voice.start();
-});
+}
+gate.addEventListener("click", () => { cards.unlock(); autoStart(true); });
 
 function cleanup() {
   cancelAnimationFrame(raf); raf = 0;
