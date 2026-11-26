@@ -499,6 +499,7 @@ class Voice {
     this.turn = this.newTurn();
     this.wakeMode = SR && !/[?&]wake=open/.test(location.search) ? "spotter" : "open"; // open = no wake word, listen continuously
     this.rec = null; this.recActive = false; this.recStart = 0; this.wakeTimer = 0; this.wakeFails = 0;
+    this.exclusive = false; this.waking = false; this.lastRecErr = "";
     this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
   }
 
@@ -514,7 +515,7 @@ class Voice {
     const resumed = this.ctx.resume(); // synchronous part of the gesture
     this.unlockOutput();
     try { await resumed; } catch (e) {}
-    if (!this.stream) await this.openMic();
+    if (!this.stream && !this.exclusive) await this.openMic();
     if (this.ctx.state !== "running") throw new Error("suspended");
     if (!this.dog) this.dog = setInterval(() => this.tick(), 1000);
     if (this.mode === "off") this.enterIdle();
@@ -538,7 +539,7 @@ class Voice {
   async resume() {
     if (!this.want || !this.hidden) return;
     this.hidden = false;
-    try { await this.ctx.resume(); await this.openMic(); }
+    try { await this.ctx.resume(); if (!this.exclusive) await this.openMic(); }
     catch (e) { this.cb.onError(isDenied(e) ? "mic-denied" : "mic-lost"); return; }
     this.enterIdle();
   }
@@ -646,16 +647,27 @@ class Voice {
     if (m === "dormant") this.scheduleWake(prev === "speaking" ? 600 : 250); else this.stopWake();
   }
   enterIdle() { if (this.wakeMode === "open") this.beginAwake(0, false); else this.sleep(); }
-  sleep() { this.ring.length = 0; this.turn = this.newTurn(); this.setMode("dormant"); if (this.mode === "dormant") this.scheduleWake(250); }
+  sleep() { this.ring.length = 0; this.turn = this.newTurn(); if (this.exclusive) this.closeMic(); this.setMode("dormant"); if (this.mode === "dormant") this.scheduleWake(250); }
   beginAwake(preMs, heard) {
     const now = performance.now();
     this.wokeAt = this.lastSpeech = now; this.heardSpeech = !!heard; this.gotAny = false; this.loudRun = 0; this.turn = this.newTurn();
     this.setMode("awake");
     if (preMs) this.sendRing(preMs);
   }
-  wake() {
-    if (!this.want || this.hidden || this.mode !== "dormant") return;
+  async wake() {
+    if (!this.want || this.hidden || this.mode !== "dormant" || this.waking) return;
     if (!this.cb.connected()) { this.soft("AVA is still connecting - try again in a moment."); return; }
+    if (this.exclusive && !this.stream) {
+      // Exclusive mode (phones whose recogniser and microphone cannot run together): the microphone is only opened after the wake word.
+      this.waking = true; this.stopWake();
+      await new Promise((r) => setTimeout(r, 200));
+      try { await this.openMic(); }
+      catch (e) { this.waking = false; this.cb.onError(isDenied(e) ? "mic-denied" : "mic-lost"); this.scheduleWake(1000); return; }
+      this.waking = false;
+      if (!this.want || this.hidden || this.mode !== "dormant") { this.closeMic(); return; }
+      this.beginAwake(0, false);
+      return;
+    }
     this.beginAwake(2000, false);
   }
   soft(msg) { const n = performance.now(); if (n - this.softAt > 4000) { this.softAt = n; this.cb.onError("notice", msg); } }
@@ -676,7 +688,8 @@ class Voice {
       r.onend = () => { this.recActive = false; this.scheduleWake(performance.now() - this.recStart < 1500 ? 1500 : 250); };
       r.onerror = (e) => {
         if (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture" || e.error === "network") {
-          if (++this.wakeFails >= 3) this.wakeUnavailable();
+          this.lastRecErr = e.error;
+          if (++this.wakeFails >= 3) { if (!this.exclusive && this.stream) this.goExclusive(); else this.wakeUnavailable(); }
         }
       };
       r.onresult = (e) => {
@@ -695,12 +708,21 @@ class Voice {
     if (r && this.recActive) { try { r.abort(); } catch (e) {} }
     if (destroy && r) { r.onstart = r.onend = r.onerror = r.onresult = null; this.rec = null; this.recActive = false; }
   }
+  // The recogniser failed while the microphone was open: release the microphone while asleep and let the recogniser own it.
+  goExclusive() {
+    this.exclusive = true; this.wakeFails = 0;
+    this.stopWake(true); this.closeMic(); this.ring.length = 0;
+    this.scheduleWake(600);
+  }
   // The recognizer cannot run here (blocked, offline, or it fights the microphone): fall back to listening continuously.
   wakeUnavailable() {
     if (this.wakeMode === "open") return;
     this.wakeMode = "open"; this.stopWake(true);
-    this.cb.onError("wake-unavailable");
-    if (this.mode === "dormant") this.beginAwake(0, false);
+    this.cb.onError("wake-unavailable", this.lastRecErr);
+    if (this.mode === "dormant") {
+      this.exclusive = false;
+      (this.stream ? Promise.resolve() : this.openMic()).then(() => { if (this.mode === "dormant" && this.want) this.beginAwake(0, false); }, () => this.cb.onError("mic-lost"));
+    }
   }
 
   /* ---------- microphone chunks -> backend ---------- */
@@ -1321,7 +1343,7 @@ async function init() {
       if (code === "mic-denied") showGate("Microphone blocked — allow it in browser settings, then tap");
       else if (code === "mic-lost") showGate("Microphone lost — tap to continue");
       else if (code === "audio-suspended") showGate("Audio paused — tap to continue");
-      else if (code === "wake-unavailable") toast("Wake word is not available here - AVA is listening continuously.", 9000);
+      else if (code === "wake-unavailable") toast("Wake word is not available here" + (detail ? " (" + detail + ")" : "") + " - AVA is listening continuously.", 9000);
       else if (code === "gemini") toast("Gemini: " + detail, 7000);
       else if (code === "no-reply") toast("AVA did not answer - say Hey AVA to try again.", 5000);
       else if (code === "playback") toast("Audio playback problem.", 4000);
