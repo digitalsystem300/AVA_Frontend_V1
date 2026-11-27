@@ -475,13 +475,16 @@ function toB64(pcm) {
 
 // "Hey AVA" / "AVA" spotting on the recognizer's text. The name must open the utterance (optionally after a greeting), so
 // ordinary sentences that merely contain the sound ("I was telling Ava...", "Java", "lava") do not wake AVA.
-const WAKE_GREET = new Set(["hey", "hi", "hello", "hay", "ok", "okay", "arre", "are", "अरे", "हे", "हाय", "हेलो", "हैलो", "ओके"]);
-const WAKE_NAME = new Set(["ava", "aava", "awa", "अवा", "आवा", "एवा"]);
-const WAKE_NAME_AFTER_GREETING = new Set(["eva", "aba", "abba"]);
+const WAKE_GREET = new Set(["hey", "hay", "hei", "hi", "he", "hello", "hallo", "ok", "okay", "arre", "are", "a", "अरे", "हे", "हेय", "हाय", "हेलो", "हैलो", "ओके", "है"]);
+const WAKE_NAME = new Set(["ava", "aava", "awa", "avaa", "अवा", "आवा", "एवा", "अवाह"]);
+// Recognisers often write the name "AVA" differently; these are only accepted right after a greeting.
+const WAKE_NAME_AFTER_GREETING = new Set(["eva", "ewa", "aba", "abba", "abha", "ova", "uva", "ave", "avah", "ayva", "aeva", "ए वी ए", "एवा", "इवा", "अभा", "आभा", "अबा", "आबा", "ओवा"]);
 function matchWake(text) {
   const t = String(text).toLowerCase().normalize("NFC").replace(/[^\p{L}\p{M}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
   if (!t.length || t.length > 12) return false;
   if (WAKE_NAME.has(t[0])) return true;
+  if (/^(hey|hay|hei|hi)(ava|awa|eva|ewa|aba|abha|ova)$/.test(t[0])) return true; // "heyava" written as one word
+  if (t.length >= 3 && t[0] === "a" && t[1] === "v" && t[2] === "a") return true;   // spelled out "A V A"
   return WAKE_GREET.has(t[0]) && !!t[1] && (WAKE_NAME.has(t[1]) || WAKE_NAME_AFTER_GREETING.has(t[1]));
 }
 
@@ -500,7 +503,7 @@ class Voice {
     this.wakeMode = SR && !/[?&]wake=open/.test(location.search) ? "spotter" : "open"; // open = no wake word, listen continuously
     this.rec = null; this.recActive = false; this.recStart = 0; this.wakeTimer = 0; this.wakeFails = 0;
     this.exclusive = this.wakeMode === "spotter" && !/[?&]wake=shared/.test(location.search); this.waking = false; this.lastRecErr = "";
-    this.unlockFn = null; this.dbgSent = 0; this.dbgRx = 0; this.dbgLast = "-"; this.dbgHeard = "-"; this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
+    this.unlockFn = null; this.dbgSent = 0; this.dbgRx = 0; this.dbgLast = "-"; this.dbgHeard = "-"; this.dbgRec = "-"; this.dog = 0; this.recovering = false; this.suspendedFor = 0; this.muteT = 0; this.softAt = 0;
   }
 
   newTurn() { return { done: false, open: 0, tools: false, audio: false }; }
@@ -703,7 +706,7 @@ class Voice {
     if (!this.rec) {
       const r = (this.rec = new SR());
       r.lang = "en-IN"; r.continuous = true; r.interimResults = true; r.maxAlternatives = 3;
-      r.onstart = () => { this.recActive = true; this.recStart = performance.now(); };
+      r.onstart = () => { this.recStarts = (this.recStarts || 0) + 1; this.recActive = true; this.recStart = performance.now(); };
       r.onend = () => { this.recActive = false; this.scheduleWake(performance.now() - this.recStart < 1500 ? 1500 : 250); };
       r.onerror = (e) => {
         if (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture" || e.error === "network") {
@@ -713,6 +716,7 @@ class Voice {
         }
       };
       r.onresult = (e) => {
+        { const last = e.results[e.results.length - 1]; if (last && last[0]) this.dbgRec = String(last[0].transcript).slice(0, 50); }
         if (this.mode !== "dormant") return;
         this.wakeFails = 0;
         for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -752,7 +756,7 @@ class Voice {
   dbg() {
     return "conn " + (document.body.dataset.avaConn || "-") + " | mode " + this.mode + " | wake " + this.wakeMode + (this.exclusive ? "/excl" : "") +
       " rec " + (this.recActive ? "on" : "off") + " | ctx " + (this.ctx ? this.ctx.state : "-") + " | mic " + (this.stream ? "on" : "off") +
-      "\nsent " + this.dbgSent + " | rx audio " + this.dbgRx + " | last " + this.dbgLast + "\nheard: " + this.dbgHeard;
+      "\nsent " + this.dbgSent + " | rx audio " + this.dbgRx + " | last " + this.dbgLast + "\nheard: " + this.dbgHeard + "\nwake-rec: " + this.dbgRec + " | err " + (this.lastRecErr || "-") + " | starts " + this.recStarts;
   }
   sendRing(ms) {
     const keep = this.ring.splice(0).slice(-Math.ceil(ms / 40));
